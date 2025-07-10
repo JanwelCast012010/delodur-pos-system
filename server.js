@@ -308,6 +308,94 @@ app.post('/api/ai-chat', async (req, res) => {
   }
 });
 
+// --- Purchase History API ---
+
+// List all purchase history records (with pagination and search)
+app.get('/api/history', async (req, res) => {
+  try {
+    const { page, limit, offset } = getPaginationParams(req);
+    const search = req.query.search || '';
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (search) {
+      whereClause += ' AND (CUSTOMER LIKE ? OR INVOICE LIKE ? OR PARTNO LIKE ? OR BRAND LIKE ? OR DESCRIPTION LIKE ? OR APPL LIKE ? OR DATE LIKE ?)';
+      const searchParam = `%${search}%`;
+      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam];
+    }
+    // Get total count for pagination
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM history ${whereClause}`,
+      params
+    );
+    const total = countResult[0].total;
+    // Fetch paginated data
+    const sql = `
+      SELECT CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST
+      FROM history
+      ${whereClause}
+      ORDER BY DATE DESC, INVOICE DESC
+      LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
+    `;
+    const [rows] = await pool.execute(sql, params);
+    console.log(`[DEBUG] /api/history fetched ${rows.length} rows`, rows.slice(0, 3));
+    res.json({
+      data: rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('❌ History API error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Create a new purchase history record
+app.post('/api/history', async (req, res) => {
+  try {
+    const { CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST } = req.body;
+    const sql = `INSERT INTO history (CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const params = [CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST];
+    const [result] = await pool.execute(sql, params);
+    res.status(201).json({ id: result.insertId });
+  } catch (error) {
+    console.error('❌ Create History error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Update a purchase history record
+app.put('/api/history/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST } = req.body;
+    const sql = `UPDATE history SET CUSTOMER=?, DATE=?, INVOICE=?, FLAG=?, CODE=?, AMOUNT=?, QTY=?, PARTNO=?, BRAND=?, DESCRIPTION=?, APPL=?, COST=? WHERE CODE=?`;
+    const params = [CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST, id];
+    const [result] = await pool.execute(sql, params);
+    res.json({ affectedRows: result.affectedRows });
+  } catch (error) {
+    console.error('❌ Update History error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Delete a purchase history record
+app.delete('/api/history/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const sql = `DELETE FROM history WHERE CODE=?`;
+    const [result] = await pool.execute(sql, [id]);
+    res.json({ affectedRows: result.affectedRows });
+  } catch (error) {
+    console.error('❌ Delete History error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 // Duplicate APIs removed - using existing authenticated endpoints
 
 // Serve React app in development mode

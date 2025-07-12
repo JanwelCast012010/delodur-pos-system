@@ -85,7 +85,15 @@ async function testDatabaseConnection() {
 // Helper function for pagination
 const getPaginationParams = (req) => {
   const page = parseInt(req.query.page) || 1;
-  const limit = Math.min(parseInt(req.query.limit) || 50, 100); // Max 100 items per page
+  let limit = parseInt(req.query.limit) || 50;
+  
+  // Allow fetching all data when limit is set to 'all' or a very high number
+  if (req.query.limit === 'all' || limit > 100000) {
+    limit = 1000000; // Very high limit to get all data
+  } else {
+    limit = Math.min(limit, 100); // Max 100 items per page for normal requests
+  }
+  
   const offset = (page - 1) * limit;
   return { page, limit, offset };
 };
@@ -217,6 +225,8 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
     console.log('📦 Fetching stock items from tbl_stock table...');
     const { page, limit, offset } = getPaginationParams(req);
     const search = req.query.search || '';
+    const filter = req.query.filter || 'all';
+    const sort = req.query.sort || '';
     
     let whereClause = 'WHERE 1=1';
     let params = [];
@@ -224,10 +234,58 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
     if (search) {
       // Remove spaces from search term for better matching
       const searchWithoutSpaces = search.replace(/\s+/g, '');
-      whereClause += ' AND (COLORCODE LIKE ? OR REMARKS LIKE ? OR BRAND LIKE ? OR BENZ LIKE ? OR BENZ2 LIKE ? OR BENZ3 LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ? OR REPLACE(COLORCODE, " ", "") LIKE ? OR REPLACE(REMARKS, " ", "") LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(BENZ, " ", "") LIKE ? OR REPLACE(BENZ2, " ", "") LIKE ? OR REPLACE(BENZ3, " ", "") LIKE ? OR REPLACE(ALTNO, " ", "") LIKE ? OR REPLACE(ALTNO2, " ", "") LIKE ?)';
-      const searchParam = `%${search}%`;
-      const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
-      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
+      
+      // Check if search is a number (for ID search)
+      const isNumericSearch = !isNaN(search) && search.trim() !== '';
+      
+      if (isNumericSearch) {
+        // For numeric searches, try exact ID match first, then LIKE for other fields
+        whereClause += ' AND (ID = ? OR BRAND LIKE ? OR BENZ LIKE ? OR BENZ2 LIKE ? OR BENZ3 LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(BENZ, " ", "") LIKE ? OR REPLACE(BENZ2, " ", "") LIKE ? OR REPLACE(BENZ3, " ", "") LIKE ? OR REPLACE(ALTNO, " ", "") LIKE ? OR REPLACE(ALTNO2, " ", "") LIKE ? )';
+        const searchParam = `%${search}%`;
+        const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
+        params = [parseInt(search), searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
+      } else {
+        // For text searches, use LIKE for all fields
+        whereClause += ' AND (ID LIKE ? OR BRAND LIKE ? OR BENZ LIKE ? OR BENZ2 LIKE ? OR BENZ3 LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(BENZ, " ", "") LIKE ? OR REPLACE(BENZ2, " ", "") LIKE ? OR REPLACE(BENZ3, " ", "") LIKE ? OR REPLACE(ALTNO, " ", "") LIKE ? OR REPLACE(ALTNO2, " ", "") LIKE ? )';
+        const searchParam = `%${search}%`;
+        const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
+        params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
+      }
+    }
+    
+    // Apply stock filters
+    if (filter === 'in-stock') {
+      whereClause += ' AND QTY > 0';
+    } else if (filter === 'out-of-stock') {
+      whereClause += ' AND QTY <= 0';
+    } else if (filter === 'low-stock') {
+      whereClause += ' AND QTY > 0 AND QTY <= 5';
+    }
+    
+    // Determine ORDER BY clause based on sort
+    let orderByClause = 'ORDER BY ID DESC';
+    switch (sort) {
+      case 'az':
+        orderByClause = 'ORDER BY BRAND ASC';
+        break;
+      case 'za':
+        orderByClause = 'ORDER BY BRAND DESC';
+        break;
+      case 'price-low':
+        orderByClause = 'ORDER BY SELL ASC';
+        break;
+      case 'price-high':
+        orderByClause = 'ORDER BY SELL DESC';
+        break;
+      case 'date-old':
+        orderByClause = 'ORDER BY DATE ASC';
+        break;
+      case 'date-new':
+        orderByClause = 'ORDER BY DATE DESC';
+        break;
+      // 'featured' and 'best' can default to ID DESC for now
+      default:
+        orderByClause = 'ORDER BY ID DESC';
     }
     
     // Get total count
@@ -243,7 +301,7 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
       SELECT *
       FROM tbl_stock
       ${whereClause}
-      ORDER BY BRAND, BENZ
+      ${orderByClause}
       LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
     `;
     const [rows] = await pool.execute(sql, params);

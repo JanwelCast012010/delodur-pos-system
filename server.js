@@ -152,9 +152,12 @@ app.get('/api/products', authenticateToken, async (req, res) => {
     let params = [];
     
     if (search) {
-      whereClause += ' AND (BENZ LIKE ? OR BRAND LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ? OR DESCRIPTION LIKE ?)';
+      // Remove spaces from search term for better matching
+      const searchWithoutSpaces = search.replace(/\s+/g, '');
+      whereClause += ' AND (BENZ LIKE ? OR BRAND LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ? OR DESCRIPTION LIKE ? OR REPLACE(BENZ, " ", "") LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(ALTNO, " ", "") LIKE ? OR REPLACE(ALTNO2, " ", "") LIKE ? OR REPLACE(DESCRIPTION, " ", "") LIKE ?)';
       const searchParam = `%${search}%`;
-      params = [searchParam, searchParam, searchParam, searchParam, searchParam];
+      const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
+      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
     }
     
     if (brand) {
@@ -208,10 +211,10 @@ app.get('/api/products/brands', authenticateToken, async (req, res) => {
 
 // POST endpoint removed - using existing master table data only
 
-// Stock Items API with pagination - reads from stocks table
+// Stock Items API with pagination - reads from tbl_stock table
 app.get('/api/stock-items', authenticateToken, async (req, res) => {
   try {
-    console.log('📦 Fetching stock items from stocks table...');
+    console.log('📦 Fetching stock items from tbl_stock table...');
     const { page, limit, offset } = getPaginationParams(req);
     const search = req.query.search || '';
     
@@ -219,14 +222,17 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
     let params = [];
     
     if (search) {
-      whereClause += ' AND (COLORCODE LIKE ? OR REMARKS LIKE ? OR BRAND LIKE ? OR BENZ LIKE ? OR BENZ2 LIKE ? OR BENZ3 LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ?)';
+      // Remove spaces from search term for better matching
+      const searchWithoutSpaces = search.replace(/\s+/g, '');
+      whereClause += ' AND (COLORCODE LIKE ? OR REMARKS LIKE ? OR BRAND LIKE ? OR BENZ LIKE ? OR BENZ2 LIKE ? OR BENZ3 LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ? OR REPLACE(COLORCODE, " ", "") LIKE ? OR REPLACE(REMARKS, " ", "") LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(BENZ, " ", "") LIKE ? OR REPLACE(BENZ2, " ", "") LIKE ? OR REPLACE(BENZ3, " ", "") LIKE ? OR REPLACE(ALTNO, " ", "") LIKE ? OR REPLACE(ALTNO2, " ", "") LIKE ?)';
       const searchParam = `%${search}%`;
-      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam];
+      const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
+      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
     }
     
     // Get total count
     const [countResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM stocks ${whereClause}`,
+      `SELECT COUNT(*) as total FROM tbl_stock ${whereClause}`,
       params
     );
     const total = countResult[0].total;
@@ -235,7 +241,7 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
     // Interpolate LIMIT and OFFSET directly
     const sql = `
       SELECT *
-      FROM stocks
+      FROM tbl_stock
       ${whereClause}
       ORDER BY BRAND, BENZ
       LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
@@ -258,13 +264,106 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
   }
 });
 
-// POST endpoint removed - using existing stocks table data only
+// POST endpoint removed - using existing tbl_stock table data only
 
 // Incoming/Outgoing stocks endpoints removed - using existing data only
 
 // Outgoing stocks endpoints removed - using existing data only
 
-// Suppliers endpoints removed - using existing data only
+// Suppliers API with pagination and space-insensitive search
+app.get('/api/suppliers', authenticateToken, async (req, res) => {
+  try {
+    console.log('🏢 Fetching suppliers...');
+    const { page, limit, offset } = getPaginationParams(req);
+    const search = req.query.search || '';
+    
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    
+    if (search) {
+      // Remove spaces from search term for better matching
+      const searchWithoutSpaces = search.replace(/\s+/g, '');
+      whereClause += ' AND (CODE LIKE ? OR NAME LIKE ? OR ADDRESS LIKE ? OR PHONE LIKE ? OR EMAIL LIKE ? OR REPLACE(CODE, " ", "") LIKE ? OR REPLACE(NAME, " ", "") LIKE ? OR REPLACE(ADDRESS, " ", "") LIKE ? OR REPLACE(PHONE, " ", "") LIKE ? OR REPLACE(EMAIL, " ", "") LIKE ?)';
+      const searchParam = `%${search}%`;
+      const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
+      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
+    }
+    
+    // Get total count for pagination
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM suppliers ${whereClause}`,
+      params
+    );
+    const total = countResult[0].total;
+    console.log(`📊 Found ${total} suppliers`);
+    
+    // Interpolate LIMIT and OFFSET directly
+    const sql = `
+      SELECT *
+      FROM suppliers
+      ${whereClause}
+      ORDER BY NAME
+      LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
+    `;
+    const [rows] = await pool.execute(sql, params);
+    
+    console.log(`🏢 Returning ${rows.length} suppliers`);
+    res.json({
+      data: rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Suppliers API error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Create new supplier
+app.post('/api/suppliers', authenticateToken, async (req, res) => {
+  try {
+    const { code, name, address, phone, email } = req.body;
+    const sql = 'INSERT INTO suppliers (CODE, NAME, ADDRESS, PHONE, EMAIL) VALUES (?, ?, ?, ?, ?)';
+    const params = [code, name, address, phone, email];
+    const [result] = await pool.execute(sql, params);
+    res.status(201).json({ id: result.insertId });
+  } catch (error) {
+    console.error('❌ Create Supplier error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Update supplier
+app.put('/api/suppliers/:id', authenticateToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { code, name, address, phone, email } = req.body;
+    const sql = 'UPDATE suppliers SET CODE=?, NAME=?, ADDRESS=?, PHONE=?, EMAIL=? WHERE CODE=?';
+    const params = [code, name, address, phone, email, id];
+    const [result] = await pool.execute(sql, params);
+    res.json({ affectedRows: result.affectedRows });
+  } catch (error) {
+    console.error('❌ Update Supplier error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Delete supplier
+app.delete('/api/suppliers/:id', authenticateToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const sql = 'DELETE FROM suppliers WHERE CODE=?';
+    const [result] = await pool.execute(sql, [id]);
+    res.json({ affectedRows: result.affectedRows });
+  } catch (error) {
+    console.error('❌ Delete Supplier error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
 
 // Reports API removed - using existing data only
 
@@ -318,9 +417,12 @@ app.get('/api/history', async (req, res) => {
     let whereClause = 'WHERE 1=1';
     let params = [];
     if (search) {
-      whereClause += ' AND (CUSTOMER LIKE ? OR INVOICE LIKE ? OR PARTNO LIKE ? OR BRAND LIKE ? OR DESCRIPTION LIKE ? OR APPL LIKE ? OR DATE LIKE ?)';
+      // Remove spaces from search term for better matching
+      const searchWithoutSpaces = search.replace(/\s+/g, '');
+      whereClause += ' AND (CUSTOMER LIKE ? OR INVOICE LIKE ? OR PARTNO LIKE ? OR BRAND LIKE ? OR DESCRIPTION LIKE ? OR APPL LIKE ? OR DATE LIKE ? OR REPLACE(CUSTOMER, " ", "") LIKE ? OR REPLACE(INVOICE, " ", "") LIKE ? OR REPLACE(PARTNO, " ", "") LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(DESCRIPTION, " ", "") LIKE ? OR REPLACE(APPL, " ", "") LIKE ? OR REPLACE(DATE, " ", "") LIKE ?)';
       const searchParam = `%${search}%`;
-      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam];
+      const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
+      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
     }
     // Get total count for pagination
     const [countResult] = await pool.execute(
@@ -330,7 +432,7 @@ app.get('/api/history', async (req, res) => {
     const total = countResult[0].total;
     // Fetch paginated data
     const sql = `
-      SELECT CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST
+      SELECT CUSTOMER, DATE_FORMAT(DATE, '%Y-%m-%d') as DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST
       FROM history
       ${whereClause}
       ORDER BY DATE DESC, INVOICE DESC

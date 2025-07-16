@@ -4,15 +4,34 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const path = require('path');
+const compression = require('compression');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const NodeCache = require('node-cache');
 require('dotenv').config();
 const { Configuration, OpenAIApi } = require('openai');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
+// Trust proxy for rate limiting behind reverse proxies
+app.set('trust proxy', 1);
+
+// Security and Performance Middleware
+app.use(helmet()); // Security headers
+app.use(compression()); // Response compression
 app.use(cors());
 app.use(express.json({ limit: '1mb' })); // Limit request size
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // increased from 100 to 1000 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+});
+app.use('/api/', limiter);
+
+// Static files
 app.use(express.static(path.join(__dirname, 'client/build')));
 
 // Database connection with optimized settings
@@ -22,7 +41,7 @@ const dbConfig = {
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'inventory_system',
   waitForConnections: true,
-  connectionLimit: 5, // Reduced from 10
+  connectionLimit: 15, // Increased for production load
   queueLimit: 0
 };
 
@@ -33,6 +52,40 @@ console.log('Database config:', {
 });
 
 const pool = mysql.createPool(dbConfig);
+
+// Initialize caching system
+const cache = new NodeCache({ 
+  stdTTL: 300, // 5 minutes default TTL
+  checkperiod: 60, // Check for expired keys every 60 seconds
+  useClones: false // Better performance
+});
+
+// Cache middleware
+const cacheMiddleware = (duration = 300) => {
+  return (req, res, next) => {
+    const key = `__express__${req.originalUrl || req.url}`;
+    const cachedResponse = cache.get(key);
+    
+    if (cachedResponse) {
+      res.send(cachedResponse);
+      return;
+    }
+    
+    res.sendResponse = res.send;
+    res.send = (body) => {
+      cache.set(key, body, duration);
+      res.sendResponse(body);
+    };
+    next();
+  };
+};
+
+// Cache invalidation helper
+const invalidateCache = (pattern) => {
+  const keys = cache.keys();
+  const matchingKeys = keys.filter(key => key.includes(pattern));
+  matchingKeys.forEach(key => cache.del(key));
+};
 
 // Test database connection
 async function testDatabaseConnection() {
@@ -149,30 +202,25 @@ app.get('/api/debug/users', async (req, res) => {
 });
 
 // Products API with pagination and search - reads from master table
-app.get('/api/products', authenticateToken, async (req, res) => {
+app.get('/api/products', authenticateToken, cacheMiddleware(180), async (req, res) => {
   try {
     console.log('📦 Fetching products from master table...');
     const { page, limit, offset } = getPaginationParams(req);
     const search = req.query.search || '';
     const brand = req.query.brand || '';
-    
     let whereClause = 'WHERE 1=1';
     let params = [];
-    
     if (search) {
-      // Remove spaces from search term for better matching
       const searchWithoutSpaces = search.replace(/\s+/g, '');
-      whereClause += ' AND (BENZ LIKE ? OR BRAND LIKE ? OR ALTNO LIKE ? OR ALTNO2 LIKE ? OR DESCRIPTION LIKE ? OR REPLACE(BENZ, " ", "") LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(ALTNO, " ", "") LIKE ? OR REPLACE(ALTNO2, " ", "") LIKE ? OR REPLACE(DESCRIPTION, " ", "") LIKE ?)';
+      whereClause += ' AND (BRAND LIKE ? OR BENZ LIKE ? OR ALTNO LIKE ? OR DESCRIPTION LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(BENZ, " ", "") LIKE ? OR REPLACE(ALTNO, " ", "") LIKE ? OR REPLACE(DESCRIPTION, " ", "") LIKE ?)';
       const searchParam = `%${search}%`;
       const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
-      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
+      params = [searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
     }
-    
     if (brand) {
       whereClause += ' AND BRAND = ?';
       params.push(brand);
     }
-    
     // Get total count for pagination
     const [countResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM master ${whereClause}`,
@@ -180,17 +228,15 @@ app.get('/api/products', authenticateToken, async (req, res) => {
     );
     const total = countResult[0].total;
     console.log(`📊 Found ${total} products`);
-    
-    // Interpolate LIMIT and OFFSET directly
+    // Always include LIMIT and OFFSET directly in the SQL string
     const sql = `
       SELECT *
       FROM master
       ${whereClause}
       ORDER BY BRAND, BENZ
-      LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
+      LIMIT ${limit} OFFSET ${offset}
     `;
-    const [rows] = await pool.execute(sql, params);
-    
+    const [rows] = await pool.execute({ sql, timeout: 15000 }, params);
     console.log(`📦 Returning ${rows.length} products`);
     res.json({
       data: rows,
@@ -208,7 +254,7 @@ app.get('/api/products', authenticateToken, async (req, res) => {
 });
 
 // Get brands for filtering - reads from master table
-app.get('/api/products/brands', authenticateToken, async (req, res) => {
+app.get('/api/products/brands', authenticateToken, cacheMiddleware(600), async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT DISTINCT BRAND FROM master WHERE BRAND IS NOT NULL AND BRAND != "" ORDER BY BRAND');
     res.json(rows.map(row => row.BRAND));
@@ -220,7 +266,7 @@ app.get('/api/products/brands', authenticateToken, async (req, res) => {
 // POST endpoint removed - using existing master table data only
 
 // Stock Items API with pagination - reads from tbl_stock table
-app.get('/api/stock-items', authenticateToken, async (req, res) => {
+app.get('/api/stock-items', authenticateToken, cacheMiddleware(120), async (req, res) => {
   try {
     console.log('📦 Fetching stock items from tbl_stock table...');
     const { page, limit, offset } = getPaginationParams(req);
@@ -296,15 +342,21 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
     const total = countResult[0].total;
     console.log(`📊 Found ${total} stock items`);
     
-    // Interpolate LIMIT and OFFSET directly
+    // Ensure limit and offset are numbers
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 50;
+    const safeOffset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
+    
+    // Always include LIMIT and OFFSET directly in the SQL string
     const sql = `
       SELECT *
       FROM tbl_stock
       ${whereClause}
       ${orderByClause}
-      LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
     `;
-    const [rows] = await pool.execute(sql, params);
+    console.log('SQL:', sql);
+    console.log('Params:', params);
+    const [rows] = await pool.execute({ sql, timeout: 15000 }, params);
     
     console.log(`📦 Returning ${rows.length} stock items`);
     res.json({
@@ -327,101 +379,6 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
 // Incoming/Outgoing stocks endpoints removed - using existing data only
 
 // Outgoing stocks endpoints removed - using existing data only
-
-// Suppliers API with pagination and space-insensitive search
-app.get('/api/suppliers', authenticateToken, async (req, res) => {
-  try {
-    console.log('🏢 Fetching suppliers...');
-    const { page, limit, offset } = getPaginationParams(req);
-    const search = req.query.search || '';
-    
-    let whereClause = 'WHERE 1=1';
-    let params = [];
-    
-    if (search) {
-      // Remove spaces from search term for better matching
-      const searchWithoutSpaces = search.replace(/\s+/g, '');
-      whereClause += ' AND (CODE LIKE ? OR NAME LIKE ? OR ADDRESS LIKE ? OR PHONE LIKE ? OR EMAIL LIKE ? OR REPLACE(CODE, " ", "") LIKE ? OR REPLACE(NAME, " ", "") LIKE ? OR REPLACE(ADDRESS, " ", "") LIKE ? OR REPLACE(PHONE, " ", "") LIKE ? OR REPLACE(EMAIL, " ", "") LIKE ?)';
-      const searchParam = `%${search}%`;
-      const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
-      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
-    }
-    
-    // Get total count for pagination
-    const [countResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM suppliers ${whereClause}`,
-      params
-    );
-    const total = countResult[0].total;
-    console.log(`📊 Found ${total} suppliers`);
-    
-    // Interpolate LIMIT and OFFSET directly
-    const sql = `
-      SELECT *
-      FROM suppliers
-      ${whereClause}
-      ORDER BY NAME
-      LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
-    `;
-    const [rows] = await pool.execute(sql, params);
-    
-    console.log(`🏢 Returning ${rows.length} suppliers`);
-    res.json({
-      data: rows,
-      pagination: {
-        page,
-        limit,
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    console.error('❌ Suppliers API error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Create new supplier
-app.post('/api/suppliers', authenticateToken, async (req, res) => {
-  try {
-    const { code, name, address, phone, email } = req.body;
-    const sql = 'INSERT INTO suppliers (CODE, NAME, ADDRESS, PHONE, EMAIL) VALUES (?, ?, ?, ?, ?)';
-    const params = [code, name, address, phone, email];
-    const [result] = await pool.execute(sql, params);
-    res.status(201).json({ id: result.insertId });
-  } catch (error) {
-    console.error('❌ Create Supplier error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Update supplier
-app.put('/api/suppliers/:id', authenticateToken, async (req, res) => {
-  try {
-    const id = req.params.id;
-    const { code, name, address, phone, email } = req.body;
-    const sql = 'UPDATE suppliers SET CODE=?, NAME=?, ADDRESS=?, PHONE=?, EMAIL=? WHERE CODE=?';
-    const params = [code, name, address, phone, email, id];
-    const [result] = await pool.execute(sql, params);
-    res.json({ affectedRows: result.affectedRows });
-  } catch (error) {
-    console.error('❌ Update Supplier error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Delete supplier
-app.delete('/api/suppliers/:id', authenticateToken, async (req, res) => {
-  try {
-    const id = req.params.id;
-    const sql = 'DELETE FROM suppliers WHERE CODE=?';
-    const [result] = await pool.execute(sql, [id]);
-    res.json({ affectedRows: result.affectedRows });
-  } catch (error) {
-    console.error('❌ Delete Supplier error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
 
 // Reports API removed - using existing data only
 
@@ -468,7 +425,7 @@ app.post('/api/ai-chat', async (req, res) => {
 // --- Purchase History API ---
 
 // List all purchase history records (with pagination and search)
-app.get('/api/history', async (req, res) => {
+app.get('/api/history', cacheMiddleware(60), async (req, res) => {
   try {
     const { page, limit, offset } = getPaginationParams(req);
     const search = req.query.search || '';
@@ -489,14 +446,15 @@ app.get('/api/history', async (req, res) => {
     );
     const total = countResult[0].total;
     // Fetch paginated data
+    // Always include LIMIT and OFFSET directly in the SQL string
     const sql = `
       SELECT CUSTOMER, DATE_FORMAT(DATE, '%Y-%m-%d') as DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST
       FROM history
       ${whereClause}
       ORDER BY DATE DESC, INVOICE DESC
-      LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}
+      LIMIT ${limit} OFFSET ${offset}
     `;
-    const [rows] = await pool.execute(sql, params);
+    const [rows] = await pool.execute({ sql, timeout: 15000 }, [...params]);
     console.log(`[DEBUG] /api/history fetched ${rows.length} rows`, rows.slice(0, 3));
     res.json({
       data: rows,
@@ -521,6 +479,10 @@ app.post('/api/history', async (req, res) => {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const params = [CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST];
     const [result] = await pool.execute(sql, params);
+    
+    // Invalidate history cache
+    invalidateCache('history');
+    
     res.status(201).json({ id: result.insertId });
   } catch (error) {
     console.error('❌ Create History error:', error);
@@ -536,6 +498,10 @@ app.put('/api/history/:id', async (req, res) => {
     const sql = `UPDATE history SET CUSTOMER=?, DATE=?, INVOICE=?, FLAG=?, CODE=?, AMOUNT=?, QTY=?, PARTNO=?, BRAND=?, DESCRIPTION=?, APPL=?, COST=? WHERE CODE=?`;
     const params = [CUSTOMER, DATE, INVOICE, FLAG, CODE, AMOUNT, QTY, PARTNO, BRAND, DESCRIPTION, APPL, COST, id];
     const [result] = await pool.execute(sql, params);
+    
+    // Invalidate history cache
+    invalidateCache('history');
+    
     res.json({ affectedRows: result.affectedRows });
   } catch (error) {
     console.error('❌ Update History error:', error);
@@ -549,6 +515,10 @@ app.delete('/api/history/:id', async (req, res) => {
     const id = req.params.id;
     const sql = `DELETE FROM history WHERE CODE=?`;
     const [result] = await pool.execute(sql, [id]);
+    
+    // Invalidate history cache
+    invalidateCache('history');
+    
     res.json({ affectedRows: result.affectedRows });
   } catch (error) {
     console.error('❌ Delete History error:', error);
@@ -558,7 +528,311 @@ app.delete('/api/history/:id', async (req, res) => {
 
 // Duplicate APIs removed - using existing authenticated endpoints
 
-// Serve React app in development mode
+// Chat API endpoints
+app.get('/api/chat/users', authenticateToken, async (req, res) => {
+  try {
+    const [users] = await pool.execute(`
+      SELECT u.id, u.username, u.role, u.created_at, 
+             ua.is_online, ua.last_activity
+      FROM users u 
+      LEFT JOIN user_activity ua ON u.id = ua.user_id 
+      ORDER BY ua.is_online DESC, u.username ASC
+    `);
+    
+    // Add display names and determine status
+    const usersWithDetails = users.map(user => {
+      const lastActivity = user.last_activity ? new Date(user.last_activity) : null;
+      const now = new Date();
+      const timeDiff = lastActivity ? (now - lastActivity) / 1000 / 60 : null; // minutes
+      
+      let status = 'offline';
+      if (user.is_online && timeDiff !== null && timeDiff < 5) {
+        status = 'online';
+      } else if (user.is_online && timeDiff !== null && timeDiff < 15) {
+        status = 'away';
+      }
+      
+      return {
+        id: user.id,
+        username: user.username,
+        name: user.username === 'admin' ? 'Administrator' : user.username.charAt(0).toUpperCase() + user.username.slice(1),
+        status: status,
+        role: user.role,
+        lastActivity: user.last_activity,
+        isCurrentUser: user.username === req.user.username
+      };
+    });
+    
+    res.json(usersWithDetails);
+  } catch (error) {
+    console.error('❌ Get users error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.get('/api/chat/messages/:userId', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const currentUserId = req.user.id;
+    
+    // Get messages between current user and selected user
+    const [messages] = await pool.execute(`
+      SELECT * FROM chat_messages 
+      WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
+      ORDER BY created_at ASC
+    `, [currentUserId, userId, userId, currentUserId]);
+    
+    res.json(messages);
+  } catch (error) {
+    console.error('❌ Get messages error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.post('/api/chat/send', authenticateToken, async (req, res) => {
+  try {
+    const { receiver_id, message } = req.body;
+    const sender_id = req.user.id;
+    
+    const [result] = await pool.execute(`
+      INSERT INTO chat_messages (sender_id, receiver_id, message, created_at) 
+      VALUES (?, ?, ?, NOW())
+    `, [sender_id, receiver_id, message]);
+    
+    // Get the created message with full details
+    const [newMessage] = await pool.execute(`
+      SELECT cm.*, u.username as sender_username 
+      FROM chat_messages cm 
+      JOIN users u ON cm.sender_id = u.id 
+      WHERE cm.id = ?
+    `, [result.insertId]);
+    
+    res.status(201).json(newMessage[0]);
+  } catch (error) {
+    console.error('❌ Send message error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.put('/api/chat/messages/read/:userId', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const currentUserId = req.user.id;
+    
+    // Mark messages as read
+    const [result] = await pool.execute(`
+      UPDATE chat_messages 
+      SET is_read = 1 
+      WHERE sender_id = ? AND receiver_id = ? AND is_read = 0
+    `, [userId, currentUserId]);
+    
+    res.json({ affectedRows: result.affectedRows });
+  } catch (error) {
+    console.error('❌ Mark read error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.get('/api/chat/unread-count', authenticateToken, async (req, res) => {
+  try {
+    const currentUserId = req.user.id;
+    
+    const [unreadCounts] = await pool.execute(`
+      SELECT sender_id, COUNT(*) as count 
+      FROM chat_messages 
+      WHERE receiver_id = ? AND is_read = 0 
+      GROUP BY sender_id
+    `, [currentUserId]);
+    
+    res.json(unreadCounts);
+  } catch (error) {
+    console.error('❌ Get unread count error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Update user activity (called when user is active)
+app.post('/api/chat/activity', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    await pool.execute(`
+      INSERT INTO user_activity (user_id, is_online, last_activity) 
+      VALUES (?, TRUE, NOW())
+      ON DUPLICATE KEY UPDATE 
+        is_online = TRUE, 
+        last_activity = NOW()
+    `, [userId]);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Update activity error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Mark user as offline (called when user logs out or closes browser)
+app.post('/api/chat/offline', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    await pool.execute(`
+      UPDATE user_activity 
+      SET is_online = FALSE, last_activity = NOW()
+      WHERE user_id = ?
+    `, [userId]);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Mark offline error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
+// Get customers
+app.get('/api/customers', authenticateToken, async (req, res) => {
+  try {
+    const { search = '' } = req.query;
+    
+    let whereClause = '';
+    let params = [];
+    
+    if (search) {
+      whereClause = 'WHERE name LIKE ? OR email LIKE ? OR company_name LIKE ?';
+      const searchParam = `%${search}%`;
+      params = [searchParam, searchParam, searchParam];
+    }
+    
+    const [customers] = await pool.execute(`
+      SELECT * FROM customers ${whereClause} ORDER BY name
+    `, params);
+    
+    res.json(customers);
+  } catch (error) {
+    console.error('❌ Get customers error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Create customer
+app.post('/api/customers', authenticateToken, async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      phone,
+      address,
+      company_name,
+      tax_id,
+      contact_person
+    } = req.body;
+    
+    const [result] = await pool.execute(`
+      INSERT INTO customers (name, email, phone, address, company_name, tax_id, contact_person)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [name, email, phone, address, company_name, tax_id, contact_person]);
+    
+    res.status(201).json({ 
+      id: result.insertId,
+      message: 'Customer created successfully' 
+    });
+  } catch (error) {
+    console.error('❌ Create customer error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Create a new stock request
+app.post('/api/stock-requests', authenticateToken, async (req, res) => {
+  try {
+    const { stockId, stockDescription, reason, userId, username, partNo, oem, brand } = req.body;
+    const sql = `
+      INSERT INTO stock_requests (user_id, username, stock_id, stock_description, reason, part_no, oem, brand)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    const params = [userId, username, stockId, stockDescription, reason, partNo, oem, brand];
+    const [result] = await pool.execute(sql, params);
+    res.status(201).json({ id: result.insertId });
+  } catch (error) {
+    console.error('❌ Create stock request error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// List all stock requests (with pagination and search)
+app.get('/api/stock-requests', authenticateToken, cacheMiddleware(60), async (req, res) => {
+  try {
+    const { page, limit, offset } = getPaginationParams(req);
+    const search = req.query.search || '';
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (search) {
+      whereClause += ' AND (stock_id LIKE ? OR stock_description LIKE ? OR part_no LIKE ? OR oem LIKE ? OR brand LIKE ?)';
+      const searchParam = `%${search}%`;
+      params = [searchParam, searchParam, searchParam, searchParam, searchParam];
+    }
+    // Get total count for pagination
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM stock_requests ${whereClause}`,
+      params
+    );
+    const total = countResult[0].total;
+    // Fetch paginated data
+    const sql = `
+      SELECT sr.*, u.username as user_username
+      FROM stock_requests sr
+      JOIN users u ON sr.user_id = u.id
+      ${whereClause}
+      ORDER BY sr.created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+    const [rows] = await pool.execute({ sql, timeout: 15000 }, params);
+    res.json({
+      data: rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Stock requests API error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Update a stock request status
+app.put('/api/stock-requests/:id', authenticateToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { status } = req.body;
+    const sql = `UPDATE stock_requests SET status = ? WHERE id = ?`;
+    const params = [status, id];
+    const [result] = await pool.execute(sql, params);
+    res.json({ affectedRows: result.affectedRows });
+  } catch (error) {
+    console.error('❌ Update stock request error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Delete a stock request
+app.delete('/api/stock-requests/:id', authenticateToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const sql = `DELETE FROM stock_requests WHERE id = ?`;
+    const [result] = await pool.execute(sql, [id]);
+    res.json({ affectedRows: result.affectedRows });
+  } catch (error) {
+    console.error('❌ Delete stock request error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Serve React app in production mode
 if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
@@ -569,17 +843,14 @@ if (process.env.NODE_ENV === 'production') {
 async function startServer() {
   try {
     console.log('🚀 Starting server...');
-    
     // Test database connection first
     const dbConnected = await testDatabaseConnection();
     if (!dbConnected) {
       console.error('❌ Cannot start server without database connection');
       process.exit(1);
     }
-    
     // Initialize database
     await testDatabaseConnection();
-    
     // Start server
     app.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT}`);
@@ -593,4 +864,4 @@ async function startServer() {
   }
 }
 
-startServer(); 
+startServer();

@@ -124,6 +124,25 @@ CREATE TABLE IF NOT EXISTS sales_history (
   INDEX idx_customer (customer)
 );
 
+
+
+-- Warehouse table for finalized/sent-to-warehouse carts
+CREATE TABLE IF NOT EXISTS warehouse (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  order_id VARCHAR(32) NOT NULL,
+  user_id INT,
+  stock_id INT NOT NULL,
+  quantity INT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  status ENUM('pending', 'completed', 'cancelled', 'returned') DEFAULT 'pending',
+  return_reason VARCHAR(255),
+  returned_at TIMESTAMP NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (stock_id) REFERENCES stock_items(id) ON DELETE CASCADE,
+  INDEX idx_user_stock (user_id, stock_id),
+  INDEX idx_order_id (order_id)
+);
+
 -- Create default admin user (password: admin123)
 INSERT INTO users (username, password, role) VALUES 
 ('admin', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'admin')

@@ -10,6 +10,7 @@ const rateLimit = require('express-rate-limit');
 const NodeCache = require('node-cache');
 require('dotenv').config();
 const { Configuration, OpenAIApi } = require('openai');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -832,6 +833,179 @@ app.delete('/api/stock-requests/:id', authenticateToken, async (req, res) => {
   }
 });
 
+
+
+// Add to cart: immediately deduct from tbl_stock, store cart in a new table (user_cart)
+app.post('/api/cart/add', authenticateToken, async (req, res) => {
+  try {
+    const { stock_id, quantity } = req.body;
+    const user_id = req.user.id;
+    if (!stock_id || !quantity || quantity <= 0) {
+      return res.status(400).json({ message: 'Invalid stock_id or quantity' });
+    }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check available stock
+      const [[stock]] = await conn.query('SELECT QTY FROM tbl_stock WHERE ID = ?', [stock_id]);
+      if (!stock || stock.QTY < quantity) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ message: 'Not enough stock available' });
+      }
+      // Deduct from stock
+      await conn.query('UPDATE tbl_stock SET QTY = QTY - ? WHERE ID = ?', [quantity, stock_id]);
+      // Add to user_cart (upsert)
+      await conn.query(`INSERT INTO user_cart (user_id, stock_id, quantity) VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)`, [user_id, stock_id, quantity]);
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Remove from cart: add back to tbl_stock, remove from user_cart
+app.post('/api/cart/remove', authenticateToken, async (req, res) => {
+  try {
+    const { stock_id, quantity } = req.body;
+    const user_id = req.user.id;
+    if (!stock_id || !quantity || quantity <= 0) {
+      return res.status(400).json({ message: 'Invalid stock_id or quantity' });
+    }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Add back to stock
+      await conn.query('UPDATE tbl_stock SET QTY = QTY + ? WHERE ID = ?', [quantity, stock_id]);
+      // Remove or reduce from user_cart
+      const [[cartItem]] = await conn.query('SELECT quantity FROM user_cart WHERE user_id = ? AND stock_id = ?', [user_id, stock_id]);
+      if (cartItem && cartItem.quantity > quantity) {
+        await conn.query('UPDATE user_cart SET quantity = quantity - ? WHERE user_id = ? AND stock_id = ?', [quantity, user_id, stock_id]);
+      } else {
+        await conn.query('DELETE FROM user_cart WHERE user_id = ? AND stock_id = ?', [user_id, stock_id]);
+      }
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// On checkout (warehouse/submit): deduct from tbl_stock.QTY only at this point
+app.post('/api/warehouse/submit', authenticateToken, async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const order_id = uuidv4();
+    const cartItems = req.body.cartItems; // Expecting [{stock_id, quantity}, ...] from frontend
+    if (!Array.isArray(cartItems) || cartItems.length === 0) {
+      return res.status(400).json({ message: 'No items in cart to submit' });
+    }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check all items have enough stock
+      const insufficient = [];
+      for (const item of cartItems) {
+        const [[stock]] = await conn.query('SELECT QTY FROM tbl_stock WHERE ID = ?', [item.stock_id]);
+        if (!stock || stock.QTY < item.quantity) {
+          insufficient.push({ stock_id: item.stock_id, requested: item.quantity, available: stock ? stock.QTY : 0 });
+        }
+      }
+      if (insufficient.length > 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(409).json({ message: 'Some items are no longer available or have insufficient stock.', insufficient });
+      }
+      // Deduct quantities from tbl_stock and insert into warehouse
+      for (const item of cartItems) {
+        await conn.query('UPDATE tbl_stock SET QTY = QTY - ? WHERE ID = ?', [item.quantity, item.stock_id]);
+        await conn.query('INSERT INTO warehouse (order_id, user_id, stock_id, quantity, status) VALUES (?, ?, ?, ?, ?)', [order_id, user_id, item.stock_id, item.quantity, 'pending']);
+      }
+      await conn.commit();
+      conn.release();
+      res.json({ success: true, order_id });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      console.error('[WAREHOUSE SUBMIT ERROR]', err);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Cancel or return an order (by order_id)
+app.post('/api/warehouse/order/cancel', authenticateToken, async (req, res) => {
+  try {
+    const { order_id, reason } = req.body;
+    if (!order_id) return res.status(400).json({ message: 'Order ID required' });
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Get all items in the order
+      const [items] = await conn.query('SELECT stock_id, quantity FROM warehouse WHERE order_id = ?', [order_id]);
+      // Restore stock for each item
+      for (const item of items) {
+        await conn.query('UPDATE tbl_stock SET QTY = QTY + ? WHERE ID = ?', [item.quantity, item.stock_id]);
+      }
+      // Update warehouse order status
+      await conn.query('UPDATE warehouse SET status = ?, return_reason = ?, returned_at = NOW() WHERE order_id = ?', ['returned', reason || null, order_id]);
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Fetch returned/cancelled orders (for notification)
+app.get('/api/warehouse/orders/returned', authenticateToken, async (req, res) => {
+  try {
+    const sql = `SELECT * FROM warehouse WHERE status = 'returned' ORDER BY returned_at DESC`;
+    const [rows] = await pool.query(sql);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get all warehouse items with stock details
+app.get('/api/warehouse/items', authenticateToken, async (req, res) => {
+  try {
+    const sql = `
+      SELECT w.*, ts.BENZ, ts.BRAND, ts.ALTNO, ts.SELL, ts.LOCATION
+      FROM warehouse w
+      JOIN tbl_stock ts ON w.stock_id = ts.ID
+      ORDER BY w.created_at DESC
+    `;
+    const [rows] = await pool.query(sql);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+
+
 // Serve React app in production mode
 if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => {
@@ -851,6 +1025,9 @@ async function startServer() {
     }
     // Initialize database
     await testDatabaseConnection();
+
+
+
     // Start server
     app.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT}`);

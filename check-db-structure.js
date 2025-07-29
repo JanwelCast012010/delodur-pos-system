@@ -20,10 +20,10 @@ async function checkDatabaseStructure() {
       console.log(`  ${field.Field} (${field.Type})`);
     });
 
-    // Check stocks table structure
-    console.log('\n📋 STOCKS table structure:');
-    const [stocksFields] = await connection.execute('DESCRIBE stocks');
-    stocksFields.forEach(field => {
+    // Check tbl_stock table structure
+    console.log('\n📋 TBL_STOCK table structure:');
+    const [tblStockFields] = await connection.execute('DESCRIBE tbl_stock');
+    tblStockFields.forEach(field => {
       console.log(`  ${field.Field} (${field.Type})`);
     });
 
@@ -41,10 +41,10 @@ async function checkDatabaseStructure() {
       console.log(`  Record ${index + 1}:`, JSON.stringify(row, null, 2));
     });
 
-    // Show sample data from stocks
-    console.log('\n📦 Sample data from STOCKS table:');
-    const [stocksSample] = await connection.execute('SELECT * FROM stocks LIMIT 2');
-    stocksSample.forEach((row, index) => {
+    // Show sample data from tbl_stock
+    console.log('\n📦 Sample data from TBL_STOCK table:');
+    const [tblStockSample] = await connection.execute('SELECT * FROM tbl_stock LIMIT 2');
+    tblStockSample.forEach((row, index) => {
       console.log(`  Record ${index + 1}:`, JSON.stringify(row, null, 2));
     });
 

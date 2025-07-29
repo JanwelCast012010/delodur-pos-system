@@ -438,7 +438,7 @@ app.get('/api/history', cacheMiddleware(60), async (req, res) => {
       whereClause += ' AND (CUSTOMER LIKE ? OR INVOICE LIKE ? OR PARTNO LIKE ? OR BRAND LIKE ? OR DESCRIPTION LIKE ? OR APPL LIKE ? OR DATE LIKE ? OR REPLACE(CUSTOMER, " ", "") LIKE ? OR REPLACE(INVOICE, " ", "") LIKE ? OR REPLACE(PARTNO, " ", "") LIKE ? OR REPLACE(BRAND, " ", "") LIKE ? OR REPLACE(DESCRIPTION, " ", "") LIKE ? OR REPLACE(APPL, " ", "") LIKE ? OR REPLACE(DATE, " ", "") LIKE ?)';
       const searchParam = `%${search}%`;
       const searchParamNoSpaces = `%${searchWithoutSpaces}%`;
-      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
+      params = [searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParam, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces, searchParamNoSpaces];
     }
     // Get total count for pagination
     const [countResult] = await pool.execute(
@@ -910,6 +910,7 @@ app.post('/api/warehouse/submit', authenticateToken, async (req, res) => {
     const user_id = req.user.id;
     const order_id = uuidv4();
     const cartItems = req.body.cartItems; // Expecting [{stock_id, quantity}, ...] from frontend
+    console.log('[WAREHOUSE SUBMIT] user_id:', user_id, 'cartItems:', cartItems);
     if (!Array.isArray(cartItems) || cartItems.length === 0) {
       return res.status(400).json({ message: 'No items in cart to submit' });
     }
@@ -927,12 +928,35 @@ app.post('/api/warehouse/submit', authenticateToken, async (req, res) => {
       if (insufficient.length > 0) {
         await conn.rollback();
         conn.release();
+        console.log('[WAREHOUSE SUBMIT] Insufficient stock:', insufficient);
         return res.status(409).json({ message: 'Some items are no longer available or have insufficient stock.', insufficient });
       }
       // Deduct quantities from tbl_stock and insert into warehouse
       for (const item of cartItems) {
+        // Get stock details for the warehouse entry
+        const [[stockDetails]] = await conn.query('SELECT BENZ, REMARKS, SELL, LOCATION FROM tbl_stock WHERE ID = ?', [item.stock_id]);
+        
+        console.log('[WAREHOUSE SUBMIT] Stock details for ID', item.stock_id, ':', stockDetails);
+        console.log('[WAREHOUSE SUBMIT] Location being stored:', stockDetails.LOCATION || '');
+        
+        // Deduct from tbl_stock
         await conn.query('UPDATE tbl_stock SET QTY = QTY - ? WHERE ID = ?', [item.quantity, item.stock_id]);
-        await conn.query('INSERT INTO warehouse (order_id, user_id, stock_id, quantity, status) VALUES (?, ?, ?, ?, ?)', [order_id, user_id, item.stock_id, item.quantity, 'pending']);
+        
+        // Insert into warehouse
+        await conn.query(
+          'INSERT INTO warehouse (qty, part_no, id_number, description, unit_price, remarks, location, order_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            item.quantity,
+            stockDetails.BENZ || '', // Part No.
+            item.stock_id,           // ID number
+            stockDetails.REMARKS || item.description || '',  // Use remarks from stock or description from cart
+            stockDetails.SELL || 0,  // Unit price
+            '',                      // Remarks
+            stockDetails.LOCATION || '', // Location from stock table
+            order_id,
+            user_id
+          ]
+        );
       }
       await conn.commit();
       conn.release();
@@ -940,10 +964,11 @@ app.post('/api/warehouse/submit', authenticateToken, async (req, res) => {
     } catch (err) {
       await conn.rollback();
       conn.release();
-      console.error('[WAREHOUSE SUBMIT ERROR]', err);
+      console.error('[WAREHOUSE SUBMIT ERROR - INNER]', err.stack || err);
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   } catch (error) {
+    console.error('[WAREHOUSE SUBMIT ERROR - OUTER]', error.stack || error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -957,10 +982,10 @@ app.post('/api/warehouse/order/cancel', authenticateToken, async (req, res) => {
     try {
       await conn.beginTransaction();
       // Get all items in the order
-      const [items] = await conn.query('SELECT stock_id, quantity FROM warehouse WHERE order_id = ?', [order_id]);
+      const [items] = await conn.query('SELECT id_number, quantity FROM warehouse WHERE order_id = ?', [order_id]);
       // Restore stock for each item
       for (const item of items) {
-        await conn.query('UPDATE tbl_stock SET QTY = QTY + ? WHERE ID = ?', [item.quantity, item.stock_id]);
+        await conn.query('UPDATE tbl_stock SET QTY = QTY + ? WHERE ID = ?', [item.quantity, item.id_number]);
       }
       // Update warehouse order status
       await conn.query('UPDATE warehouse SET status = ?, return_reason = ?, returned_at = NOW() WHERE order_id = ?', ['returned', reason || null, order_id]);
@@ -994,7 +1019,7 @@ app.get('/api/warehouse/items', authenticateToken, async (req, res) => {
     const sql = `
       SELECT w.*, ts.BENZ, ts.BRAND, ts.ALTNO, ts.SELL, ts.LOCATION
       FROM warehouse w
-      JOIN tbl_stock ts ON w.stock_id = ts.ID
+      JOIN tbl_stock ts ON w.id_number = ts.ID
       ORDER BY w.created_at DESC
     `;
     const [rows] = await pool.query(sql);
@@ -1004,7 +1029,313 @@ app.get('/api/warehouse/items', authenticateToken, async (req, res) => {
   }
 });
 
+// API to send items from tbl_stock to warehouse
+app.post('/api/stock/send-to-warehouse', authenticateToken, async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const cartItems = req.body.cartItems; // [{stock_id, quantity}]
+    if (!Array.isArray(cartItems) || cartItems.length === 0) {
+      return res.status(400).json({ message: 'No items in cart to send' });
+    }
+    const order_id = require('crypto').randomBytes(16).toString('hex');
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check all items have enough stock
+      for (const item of cartItems) {
+        const [[stock]] = await conn.query('SELECT QTY FROM tbl_stock WHERE ID = ?', [item.stock_id]);
+        if (!stock || stock.QTY < item.quantity) {
+          await conn.rollback();
+          conn.release();
+          return res.status(409).json({ message: 'Insufficient stock for item', stock_id: item.stock_id });
+        }
+      }
+      // Deduct from tbl_stock and insert into warehouse
+      for (const item of cartItems) {
+        await conn.query('UPDATE tbl_stock SET QTY = QTY - ? WHERE ID = ?', [item.quantity, item.stock_id]);
+        await conn.query('INSERT INTO warehouse (order_id, user_id, stock_id, quantity, status) VALUES (?, ?, ?, ?, ?)', [order_id, user_id, item.stock_id, item.quantity, 'pending']);
+      }
+      await conn.commit();
+      conn.release();
+      res.json({ success: true, order_id });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
 
+// API to send items from warehouse to cashier
+app.post('/api/warehouse/send-to-cashier', authenticateToken, async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const { order_id, items } = req.body; // items: [{warehouse_id, stock_id, quantity}]
+    if (!order_id || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Order ID and items are required' });
+  }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check all items exist in warehouse and have enough quantity
+      for (const item of items) {
+        const [[warehouseItem]] = await conn.query('SELECT quantity FROM warehouse WHERE id = ? AND stock_id = ? AND order_id = ?', [item.warehouse_id, item.stock_id, order_id]);
+        if (!warehouseItem || warehouseItem.quantity < item.quantity) {
+          await conn.rollback();
+          conn.release();
+          return res.status(409).json({ message: 'Insufficient quantity in warehouse for item', warehouse_id: item.warehouse_id });
+        }
+      }
+      // Deduct from warehouse and insert into cashier
+      for (const item of items) {
+        await conn.query('UPDATE warehouse SET quantity = quantity - ? WHERE id = ? AND stock_id = ? AND order_id = ?', [item.quantity, item.warehouse_id, item.stock_id, order_id]);
+        await conn.query('INSERT INTO cashier (order_id, user_id, stock_id, quantity, status) VALUES (?, ?, ?, ?, ?)', [order_id, user_id, item.stock_id, item.quantity, 'pending']);
+      }
+      // Optionally, remove warehouse rows with zero quantity
+      await conn.query('DELETE FROM warehouse WHERE quantity <= 0');
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// API to send items from warehouse to service
+app.post('/api/warehouse/send-to-service', authenticateToken, async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const { order_id, items } = req.body; // items: [{warehouse_id, stock_id, quantity}]
+    if (!order_id || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Order ID and items are required' });
+    }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check all items exist in warehouse and have enough quantity
+      for (const item of items) {
+        const [[warehouseItem]] = await conn.query('SELECT quantity FROM warehouse WHERE id = ? AND stock_id = ? AND order_id = ?', [item.warehouse_id, item.stock_id, order_id]);
+        if (!warehouseItem || warehouseItem.quantity < item.quantity) {
+          await conn.rollback();
+          conn.release();
+          return res.status(409).json({ message: 'Insufficient quantity in warehouse for item', warehouse_id: item.warehouse_id });
+        }
+      }
+      // Deduct from warehouse and insert into service
+      for (const item of items) {
+        await conn.query('UPDATE warehouse SET quantity = quantity - ? WHERE id = ? AND stock_id = ? AND order_id = ?', [item.quantity, item.warehouse_id, item.stock_id, order_id]);
+        await conn.query('INSERT INTO service (order_id, user_id, stock_id, quantity, status) VALUES (?, ?, ?, ?, ?)', [order_id, user_id, item.stock_id, item.quantity, 'pending']);
+      }
+      // Optionally, remove warehouse rows with zero quantity
+      await conn.query('DELETE FROM warehouse WHERE quantity <= 0');
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// API to send items from service to cashier (if service needs the parts)
+app.post('/api/service/send-to-cashier', authenticateToken, async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const { order_id, items } = req.body; // items: [{service_id, stock_id, quantity}]
+    if (!order_id || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Order ID and items are required' });
+    }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check all items exist in service and have enough quantity
+      for (const item of items) {
+        const [[serviceItem]] = await conn.query('SELECT quantity FROM service WHERE id = ? AND stock_id = ? AND order_id = ?', [item.service_id, item.stock_id, order_id]);
+        if (!serviceItem || serviceItem.quantity < item.quantity) {
+          await conn.rollback();
+          conn.release();
+          return res.status(409).json({ message: 'Insufficient quantity in service for item', service_id: item.service_id });
+        }
+      }
+      // Deduct from service and insert into cashier
+      for (const item of items) {
+        await conn.query('UPDATE service SET quantity = quantity - ? WHERE id = ? AND stock_id = ? AND order_id = ?', [item.quantity, item.service_id, item.stock_id, order_id]);
+        await conn.query('INSERT INTO cashier (order_id, user_id, stock_id, quantity, status) VALUES (?, ?, ?, ?, ?)', [order_id, user_id, item.stock_id, item.quantity, 'pending']);
+      }
+      // Update service status and remove rows with zero quantity
+      await conn.query('UPDATE service SET status = ?, sent_to_cashier_at = NOW() WHERE quantity <= 0', ['sent_to_cashier']);
+      await conn.query('DELETE FROM service WHERE quantity <= 0');
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// API to return items from service back to tbl_stock (if service doesn't need the parts)
+app.post('/api/service/return-to-stock', authenticateToken, async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const { order_id, items } = req.body; // items: [{service_id, stock_id, quantity}]
+    if (!order_id || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Order ID and items are required' });
+    }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check all items exist in service and have enough quantity
+      for (const item of items) {
+        const [[serviceItem]] = await conn.query('SELECT quantity FROM service WHERE id = ? AND stock_id = ? AND order_id = ?', [item.service_id, item.stock_id, order_id]);
+        if (!serviceItem || serviceItem.quantity < item.quantity) {
+          await conn.rollback();
+          conn.release();
+          return res.status(409).json({ message: 'Insufficient quantity in service for item', service_id: item.service_id });
+        }
+      }
+      // Deduct from service and restore to tbl_stock
+      for (const item of items) {
+        await conn.query('UPDATE service SET quantity = quantity - ? WHERE id = ? AND stock_id = ? AND order_id = ?', [item.quantity, item.service_id, item.stock_id, order_id]);
+        await conn.query('UPDATE tbl_stock SET QTY = QTY + ? WHERE ID = ?', [item.quantity, item.stock_id]);
+      }
+      // Update service status and remove rows with zero quantity
+      await conn.query('UPDATE service SET status = ?, returned_at = NOW() WHERE quantity <= 0', ['returned_to_stock']);
+      await conn.query('DELETE FROM service WHERE quantity <= 0');
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// API to process payment and move items from cashier to sales_history
+app.post('/api/cashier/process-payment', authenticateToken, async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const { order_id, items, payment_method, total_amount } = req.body; // items: [{cashier_id, stock_id, quantity}]
+    if (!order_id || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Order ID, items, and payment details are required' });
+    }
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      // Check all items exist in cashier and have enough quantity
+      for (const item of items) {
+        const [[cashierItem]] = await conn.query('SELECT quantity FROM cashier WHERE id = ? AND stock_id = ? AND order_id = ?', [item.cashier_id, item.stock_id, order_id]);
+        if (!cashierItem || cashierItem.quantity < item.quantity) {
+          await conn.rollback();
+          conn.release();
+          return res.status(409).json({ message: 'Insufficient quantity in cashier for item', cashier_id: item.cashier_id });
+        }
+      }
+      // Deduct from cashier and insert into sales_history
+      for (const item of items) {
+        await conn.query('UPDATE cashier SET quantity = quantity - ? WHERE id = ? AND stock_id = ? AND order_id = ?', [item.quantity, item.cashier_id, item.stock_id, order_id]);
+        await conn.query('INSERT INTO sales_history (order_id, user_id, stock_id, quantity, sold_at, total_amount, payment_method) VALUES (?, ?, ?, ?, NOW(), ?, ?)', [order_id, user_id, item.stock_id, item.quantity, total_amount, payment_method]);
+      }
+      // Update cashier status and remove rows with zero quantity
+      await conn.query('UPDATE cashier SET status = ?, sold_at = NOW() WHERE quantity <= 0');
+      await conn.query('DELETE FROM cashier WHERE quantity <= 0');
+      await conn.commit();
+      conn.release();
+      res.json({ success: true });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      throw err;
+    }
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get cart items from warehouse table
+app.get('/api/warehouse/cart', authenticateToken, async (req, res) => {
+  try {
+    const sql = `
+      SELECT w.*, ts.BENZ, ts.BRAND, ts.ALTNO, ts.SELL, ts.LOCATION
+      FROM warehouse w
+      JOIN tbl_stock ts ON w.id_number = ts.ID
+      ORDER BY w.created_at DESC
+    `;
+    const [rows] = await pool.query(sql);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get cart items from cashier table
+app.get('/api/cashier/cart', authenticateToken, async (req, res) => {
+  try {
+    const sql = `
+      SELECT c.*, ts.BENZ, ts.BRAND, ts.ALTNO, ts.SELL, ts.LOCATION
+      FROM cashier c
+      JOIN tbl_stock ts ON c.stock_id = ts.ID
+      WHERE c.status = 'pending'
+      ORDER BY c.created_at DESC
+    `;
+    const [rows] = await pool.query(sql);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get cart items from service table
+app.get('/api/service/cart', authenticateToken, async (req, res) => {
+  try {
+    const sql = `
+      SELECT s.*, ts.BENZ, ts.BRAND, ts.ALTNO, ts.SELL, ts.LOCATION
+      FROM service s
+      JOIN tbl_stock ts ON s.stock_id = ts.ID
+      WHERE s.status = 'pending'
+      ORDER BY s.created_at DESC
+    `;
+    const [rows] = await pool.query(sql);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get all borrowed parts for the Service page
+app.get('/api/service/items', authenticateToken, async (req, res) => {
+  try {
+    const sql = `
+      SELECT s.*, ts.BENZ, ts.BRAND, ts.ALTNO, ts.SELL, ts.LOCATION
+      FROM service s
+      JOIN tbl_stock ts ON s.stock_id = ts.ID
+      ORDER BY s.created_at DESC
+    `;
+    const [rows] = await pool.query(sql);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
 
 // Serve React app in production mode
 if (process.env.NODE_ENV === 'production') {

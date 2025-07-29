@@ -192,6 +192,161 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// User Management API Endpoints
+
+// Get all users (Admin only)
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: true, message: 'Access denied. Admin privileges required.' });
+    }
+
+    const [users] = await pool.execute(`
+      SELECT id, username, role, email, fullName, created_at 
+      FROM users 
+      ORDER BY created_at DESC
+    `);
+
+    res.json({
+      error: false,
+      data: users
+    });
+  } catch (error) {
+    console.error('❌ Get users error:', error);
+    res.status(500).json({ error: true, message: 'Failed to fetch users.' });
+  }
+});
+
+// Create new user (Admin only)
+app.post('/api/users', authenticateToken, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: true, message: 'Access denied. Admin privileges required.' });
+    }
+
+    const { username, password, role, email, fullName } = req.body;
+
+    // Validate required fields
+    if (!username || !password) {
+      return res.status(400).json({ error: true, message: 'Username and password are required.' });
+    }
+
+    // Check if username already exists
+    const [existingUsers] = await pool.execute('SELECT id FROM users WHERE username = ?', [username]);
+    if (existingUsers.length > 0) {
+      return res.status(400).json({ error: true, message: 'Username already exists.' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insert new user
+    const [result] = await pool.execute(`
+      INSERT INTO users (username, password, role, email, fullName) 
+      VALUES (?, ?, ?, ?, ?)
+    `, [username, hashedPassword, role || 'user', email || null, fullName || null]);
+
+    res.status(201).json({
+      error: false,
+      message: 'User created successfully',
+      data: {
+        id: result.insertId,
+        username,
+        role: role || 'user',
+        email,
+        fullName
+      }
+    });
+  } catch (error) {
+    console.error('❌ Create user error:', error);
+    res.status(500).json({ error: true, message: 'Failed to create user.' });
+  }
+});
+
+// Update user (Admin only)
+app.put('/api/users/:id', authenticateToken, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: true, message: 'Access denied. Admin privileges required.' });
+    }
+
+    const userId = req.params.id;
+    const { username, password, role, email, fullName } = req.body;
+
+    // Validate required fields
+    if (!username) {
+      return res.status(400).json({ error: true, message: 'Username is required.' });
+    }
+
+    // Check if username already exists for other users
+    const [existingUsers] = await pool.execute('SELECT id FROM users WHERE username = ? AND id != ?', [username, userId]);
+    if (existingUsers.length > 0) {
+      return res.status(400).json({ error: true, message: 'Username already exists.' });
+    }
+
+    // Build update query
+    let updateQuery = 'UPDATE users SET username = ?, role = ?, email = ?, fullName = ?';
+    let params = [username, role || 'user', email || null, fullName || null];
+
+    // Add password to update if provided
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updateQuery += ', password = ?';
+      params.push(hashedPassword);
+    }
+
+    updateQuery += ' WHERE id = ?';
+    params.push(userId);
+
+    await pool.execute(updateQuery, params);
+
+    res.json({
+      error: false,
+      message: 'User updated successfully',
+      data: {
+        id: userId,
+        username,
+        role: role || 'user',
+        email,
+        fullName
+      }
+    });
+  } catch (error) {
+    console.error('❌ Update user error:', error);
+    res.status(500).json({ error: true, message: 'Failed to update user.' });
+  }
+});
+
+// Delete user (Admin only)
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: true, message: 'Access denied. Admin privileges required.' });
+    }
+
+    const userId = req.params.id;
+
+    // Prevent deleting own account
+    if (parseInt(userId) === req.user.id) {
+      return res.status(400).json({ error: true, message: 'Cannot delete your own account.' });
+    }
+
+    await pool.execute('DELETE FROM users WHERE id = ?', [userId]);
+
+    res.json({
+      error: false,
+      message: 'User deleted successfully'
+    });
+  } catch (error) {
+    console.error('❌ Delete user error:', error);
+    res.status(500).json({ error: true, message: 'Failed to delete user.' });
+  }
+});
+
 // Debug endpoint to check users
 app.get('/api/debug/users', async (req, res) => {
   try {

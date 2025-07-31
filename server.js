@@ -1059,63 +1059,73 @@ app.post('/api/cart/remove', authenticateToken, async (req, res) => {
   }
 });
 
-// On checkout (warehouse/submit): deduct from tbl_stock.QTY only at this point
+// Submit items to warehouse (deduct from stock_items.quantity)
 app.post('/api/warehouse/submit', authenticateToken, async (req, res) => {
   try {
     const user_id = req.user.id;
     const order_id = uuidv4();
     const cartItems = req.body.cartItems; // Expecting [{stock_id, quantity}, ...] from frontend
     console.log('[WAREHOUSE SUBMIT] user_id:', user_id, 'cartItems:', cartItems);
+    
     if (!Array.isArray(cartItems) || cartItems.length === 0) {
       return res.status(400).json({ message: 'No items in cart to submit' });
     }
+    
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+      
       // Check all items have enough stock
       const insufficient = [];
       for (const item of cartItems) {
-        const [[stock]] = await conn.query('SELECT QTY FROM tbl_stock WHERE ID = ?', [item.stock_id]);
-        if (!stock || stock.QTY < item.quantity) {
-          insufficient.push({ stock_id: item.stock_id, requested: item.quantity, available: stock ? stock.QTY : 0 });
+        const [[stock]] = await conn.query('SELECT quantity FROM stock_items WHERE id = ?', [item.stock_id]);
+        if (!stock || stock.quantity < item.quantity) {
+          insufficient.push({ 
+            stock_id: item.stock_id, 
+            requested: item.quantity, 
+            available: stock ? stock.quantity : 0 
+          });
         }
       }
+      
       if (insufficient.length > 0) {
         await conn.rollback();
         conn.release();
         console.log('[WAREHOUSE SUBMIT] Insufficient stock:', insufficient);
-        return res.status(409).json({ message: 'Some items are no longer available or have insufficient stock.', insufficient });
+        return res.status(409).json({ 
+          message: 'Some items are no longer available or have insufficient stock.', 
+          insufficient 
+        });
       }
-      // Deduct quantities from tbl_stock and insert into warehouse
+      
+      // Deduct quantities from stock_items and insert into warehouse
       for (const item of cartItems) {
         // Get stock details for the warehouse entry
-        const [[stockDetails]] = await conn.query('SELECT BENZ, REMARKS, SELL, LOCATION FROM tbl_stock WHERE ID = ?', [item.stock_id]);
+        const [[stockDetails]] = await conn.query(`
+          SELECT si.quantity, si.selling_price, p.benz_number, p.brand, p.description, p.location
+          FROM stock_items si
+          JOIN products p ON si.product_id = p.id
+          WHERE si.id = ?
+        `, [item.stock_id]);
         
         console.log('[WAREHOUSE SUBMIT] Stock details for ID', item.stock_id, ':', stockDetails);
-        console.log('[WAREHOUSE SUBMIT] Location being stored:', stockDetails.LOCATION || '');
         
-        // Deduct from tbl_stock
-        await conn.query('UPDATE tbl_stock SET QTY = QTY - ? WHERE ID = ?', [item.quantity, item.stock_id]);
+        // Deduct from stock_items
+        await conn.query('UPDATE stock_items SET quantity = quantity - ? WHERE id = ?', [item.quantity, item.stock_id]);
         
         // Insert into warehouse
         await conn.query(
-          'INSERT INTO warehouse (qty, part_no, id_number, description, unit_price, remarks, location, order_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [
-            item.quantity,
-            stockDetails.BENZ || '', // Part No.
-            item.stock_id,           // ID number
-            stockDetails.REMARKS || item.description || '',  // Use remarks from stock or description from cart
-            stockDetails.SELL || 0,  // Unit price
-            '',                      // Remarks
-            stockDetails.LOCATION || '', // Location from stock table
-            order_id,
-            user_id
-          ]
+          'INSERT INTO warehouse (order_id, user_id, stock_id, quantity, status) VALUES (?, ?, ?, ?, ?)',
+          [order_id, user_id, item.stock_id, item.quantity, 'pending']
         );
       }
+      
       await conn.commit();
       conn.release();
+      
+      console.log(`✅ Warehouse order ${order_id} submitted successfully with ${cartItems.length} items`);
       res.json({ success: true, order_id });
+      
     } catch (err) {
       await conn.rollback();
       conn.release();
@@ -1133,26 +1143,46 @@ app.post('/api/warehouse/order/cancel', authenticateToken, async (req, res) => {
   try {
     const { order_id, reason } = req.body;
     if (!order_id) return res.status(400).json({ message: 'Order ID required' });
+    
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
-      // Get all items in the order
-      const [items] = await conn.query('SELECT id_number, quantity FROM warehouse WHERE order_id = ?', [order_id]);
-      // Restore stock for each item
-      for (const item of items) {
-        await conn.query('UPDATE tbl_stock SET QTY = QTY + ? WHERE ID = ?', [item.quantity, item.id_number]);
+      
+      // Get all items in the order with their quantities
+      const [items] = await conn.query('SELECT stock_id, quantity FROM warehouse WHERE order_id = ? AND status = "pending"', [order_id]);
+      
+      if (items.length === 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(404).json({ message: 'No pending items found for this order' });
       }
-      // Update warehouse order status
-      await conn.query('UPDATE warehouse SET status = ?, return_reason = ?, returned_at = NOW() WHERE order_id = ?', ['returned', reason || null, order_id]);
+      
+      // Restore stock quantities for each item
+      for (const item of items) {
+        await conn.query('UPDATE stock_items SET quantity = quantity + ? WHERE id = ?', [item.quantity, item.stock_id]);
+      }
+      
+      // Update warehouse order status to cancelled
+      await conn.query('UPDATE warehouse SET status = ?, return_reason = ?, returned_at = NOW() WHERE order_id = ?', ['cancelled', reason || 'Cancelled by user', order_id]);
+      
       await conn.commit();
       conn.release();
-      res.json({ success: true });
+      
+      console.log(`✅ Order ${order_id} cancelled successfully. Returned ${items.length} items to stock.`);
+      res.json({ 
+        success: true, 
+        message: `Order cancelled successfully. ${items.length} items returned to stock.`,
+        items_returned: items.length
+      });
+      
     } catch (err) {
       await conn.rollback();
       conn.release();
+      console.error('❌ Cancel order error:', err);
       throw err;
     }
   } catch (error) {
+    console.error('❌ Cancel order error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1172,14 +1202,27 @@ app.get('/api/warehouse/orders/returned', authenticateToken, async (req, res) =>
 app.get('/api/warehouse/items', authenticateToken, async (req, res) => {
   try {
     const sql = `
-      SELECT w.*, ts.BENZ, ts.BRAND, ts.ALTNO, ts.SELL, ts.LOCATION
+      SELECT 
+        w.*,
+        si.id as stock_item_id,
+        p.benz_number,
+        p.brand,
+        p.alt_number,
+        p.description,
+        si.selling_price as SELL,
+        p.location as LOCATION,
+        CONCAT(p.brand, ' - ', p.description) as PRODUCT_NAME,
+        p.alt_number as PRODUCT_CODE
       FROM warehouse w
-      JOIN tbl_stock ts ON w.id_number = ts.ID
+      JOIN stock_items si ON w.stock_id = si.id
+      JOIN products p ON si.product_id = p.id
+      WHERE w.status = 'pending'
       ORDER BY w.created_at DESC
     `;
     const [rows] = await pool.query(sql);
     res.json(rows);
   } catch (error) {
+    console.error('❌ Warehouse items error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });

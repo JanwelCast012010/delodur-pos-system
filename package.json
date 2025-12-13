@@ -5,12 +5,12 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "NODE_ENV=development node server.js",
+    "dev": "node server.js",
     "client": "cd client && npm start",
     "build": "cd client && npm run build",
     "install-client": "cd client && npm install",
     "heroku-postbuild": "npm run install-client && npm run build",
-    "prod": "NODE_ENV=production node server.js",
+    "prod": "node server.js",
     "dev:client": "cd client && npm start",
     "build:dev": "cd client && npm run build",
     "build:prod": "cd client && npm run build",
@@ -25,6 +25,7 @@
     "cors": "^2.8.5",
     "csv-parser": "^3.2.0",
     "dbf-reader": "^1.0.3",
+    "dbffile": "^1.12.0",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
@@ -38,7 +39,9 @@
     "react-chartjs-2": "^5.3.0",
     "react-icons": "^5.5.0",
     "redis": "^4.6.12",
-    "uuid": "^11.1.0"
+    "socket.io": "^4.7.2",
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

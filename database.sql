@@ -10,8 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
   username VARCHAR(50) UNIQUE NOT NULL,
   password VARCHAR(255) NOT NULL,
   role ENUM('admin', 'user') DEFAULT 'user',
-  email VARCHAR(100),
   fullName VARCHAR(100),
+  permissions TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -25,6 +25,44 @@ CREATE TABLE IF NOT EXISTS suppliers (
   phone VARCHAR(20),
   email VARCHAR(100),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Customers table
+CREATE TABLE IF NOT EXISTS customers (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  customer_code VARCHAR(20) UNIQUE NOT NULL,
+  customer_name VARCHAR(100) NOT NULL,
+  contact_person VARCHAR(100),
+  phone VARCHAR(20),
+  email VARCHAR(100),
+  address TEXT,
+  credit_limit DECIMAL(10,2) DEFAULT 0,
+  payment_terms ENUM('Cash', 'Net 15', 'Net 30', 'Net 45', 'Net 60') DEFAULT 'Cash',
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_customer_code (customer_code),
+  INDEX idx_customer_name (customer_name)
+);
+
+-- Master table (from DBF import)
+CREATE TABLE IF NOT EXISTS master (
+  DINFLAG CHAR(1) DEFAULT NULL,
+  BENZ CHAR(16) DEFAULT NULL,
+  BENZ2 CHAR(16) DEFAULT NULL,
+  BENZ3 CHAR(16) DEFAULT NULL,
+  BRAND CHAR(12) DEFAULT NULL,
+  ALTNO CHAR(20) DEFAULT NULL,
+  ALTNO2 CHAR(20) DEFAULT NULL,
+  `DESC` CHAR(30) DEFAULT NULL,
+  APPL CHAR(30) DEFAULT NULL,
+  UNIT CHAR(6) DEFAULT NULL,
+  LOCATION CHAR(10) DEFAULT NULL,
+  REORDER INT(5) DEFAULT NULL,
+  BALANCE INT(5) DEFAULT NULL,
+  INDEX idx_benz (BENZ),
+  INDEX idx_brand (BRAND),
+  INDEX idx_altno (ALTNO)
 );
 
 -- Products table (master catalog)
@@ -146,6 +184,37 @@ CREATE TABLE IF NOT EXISTS warehouse (
   INDEX idx_order_id (order_id)
 );
 
+-- Order sequence table for sequential order numbering
+CREATE TABLE IF NOT EXISTS order_sequence (
+  id INT PRIMARY KEY DEFAULT 1,
+  next_order_number INT NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Initialize order sequence if it doesn't exist
+INSERT INTO order_sequence (id, next_order_number) VALUES (1, 1)
+ON DUPLICATE KEY UPDATE next_order_number = next_order_number;
+
+-- Stock requests table
+CREATE TABLE IF NOT EXISTS stock_requests (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT,
+  username VARCHAR(50),
+  stock_id VARCHAR(50),
+  stock_description TEXT,
+  reason TEXT,
+  status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  part_no VARCHAR(50),
+  oem VARCHAR(50),
+  brand VARCHAR(50),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+  INDEX idx_user_id (user_id),
+  INDEX idx_status (status),
+  INDEX idx_created_at (created_at)
+);
+
 -- Create default admin user (password: admin123)
 INSERT INTO users (username, password, role) VALUES 
 ('admin', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'admin')
@@ -184,6 +253,7 @@ CREATE TABLE IF NOT EXISTS cashier (
   user_id INT,
   stock_id INT NOT NULL,
   quantity INT NOT NULL,
+  unit_price DECIMAL(10,2) DEFAULT 0.00,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   status ENUM('pending', 'sold', 'cancelled') DEFAULT 'pending',
   sold_at TIMESTAMP NULL,
@@ -200,6 +270,9 @@ CREATE TABLE IF NOT EXISTS service (
   user_id INT,
   stock_id INT NOT NULL,
   quantity INT NOT NULL,
+  unit_price DECIMAL(10,2) DEFAULT 0.00,
+  customer_name VARCHAR(255) DEFAULT NULL,
+  plate_number VARCHAR(50) DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   status ENUM('pending', 'used', 'returned_to_stock', 'sent_to_cashier') DEFAULT 'pending',
   returned_at TIMESTAMP NULL,

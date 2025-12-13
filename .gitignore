@@ -83,4 +83,25 @@ FILES/
 *.exe
 *.EXE
 *.bat
-*.BAT 
+*.BAT
+
+# System backups (too large for Git)
+SYSTEM_BACKUPS/
+DB_BACKUPS/
+
+# Temporary files and exports
+temp/
+FOR LABEL/
+*.csv
+*.xlsx
+*.xls
+
+# Test files
+test-*.html
+test-*.js
+
+# Large media files (optional - uncomment if you want to exclude)
+# *.png
+# *.jpg
+# *.jpeg
+# PICTURES LOGO/ 

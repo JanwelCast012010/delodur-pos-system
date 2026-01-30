@@ -386,6 +386,31 @@ async function initializeWarehouseSupportTables() {
 
 initializeWarehouseSupportTables();
 
+// Shipment Checking table
+async function initializeShipmentCheckingTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tbl_shipment_checking (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        quantity VARCHAR(50) DEFAULT NULL,
+        brand_number VARCHAR(100) DEFAULT NULL,
+        brand VARCHAR(100) DEFAULT NULL,
+        part_no VARCHAR(100) DEFAULT NULL,
+        status ENUM('complete','incomplete') DEFAULT 'incomplete',
+        stock_id INT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_status (status),
+        INDEX idx_brand (brand),
+        INDEX idx_part_no (part_no)
+      )
+    `);
+    console.log('✅ Shipment checking table ensured');
+  } catch (err) {
+    console.error('❌ Failed ensuring shipment checking table:', err.message);
+  }
+}
+initializeShipmentCheckingTable();
+
 // API Routes
 
 // Authentication
@@ -463,6 +488,77 @@ app.post('/api/maintenance/toggle', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// System Documentation PDF (server-side generation for reliable content)
+app.get('/api/documentation/pdf', authenticateToken, async (req, res) => {
+  let browser;
+  try {
+    const mdPath = path.join(__dirname, 'client', 'public', 'SYSTEM_THESIS_DOCUMENTATION.md');
+    const altPath = path.join(__dirname, 'SYSTEM_THESIS_DOCUMENTATION.md');
+    let mdContent;
+    try {
+      mdContent = await fs.readFile(mdPath, 'utf8');
+    } catch {
+      mdContent = await fs.readFile(altPath, 'utf8');
+    }
+    const { marked } = await import('marked');
+    const bodyHtml = await marked.parse(mdContent);
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+      body { font-family: Georgia, 'Times New Roman', serif; font-size: 12pt; line-height: 1.8; color: #333; padding: 40px; max-width: 900px; margin: 0 auto; }
+      h1 { color: #1a1a1a; border-bottom: 3px solid #007bff; padding-bottom: 10px; margin-top: 40px; margin-bottom: 20px; font-size: 28px; }
+      h2 { color: #2d2d2d; border-bottom: 2px solid #e0e0e0; padding-bottom: 8px; margin-top: 30px; margin-bottom: 15px; font-size: 22px; }
+      h3 { color: #404040; margin-top: 25px; margin-bottom: 12px; font-size: 18px; }
+      p { margin-bottom: 15px; text-align: justify; }
+      ul, ol { margin: 15px 0; padding-left: 30px; }
+      li { margin-bottom: 8px; }
+      code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; font-size: 11pt; }
+      pre { background: #f8f8f8; border: 1px solid #e0e0e0; border-radius: 4px; padding: 15px; margin: 20px 0; overflow-x: auto; }
+      pre code { background: none; padding: 0; }
+      table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+      th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+      th { background: #f8f8f8; font-weight: 600; }
+      blockquote { border-left: 4px solid #007bff; padding-left: 20px; margin: 20px 0; color: #666; font-style: italic; }
+      hr { border: none; border-top: 2px solid #e0e0e0; margin: 30px 0; }
+      strong { font-weight: 600; color: #1a1a1a; }
+      a { color: #007bff; }
+    </style></head><body>${bodyHtml}</body></html>`;
+    const puppeteer = require('puppeteer');
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--no-first-run',
+      ],
+    });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'load', timeout: 60000 });
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 800)));
+    let rawPdf = await page.pdf({
+      format: 'A4',
+      margin: { top: '15mm', right: '15mm', bottom: '15mm', left: '15mm' },
+      printBackground: true,
+    });
+    await browser.close();
+    browser = null;
+    const pdfBuffer = Buffer.isBuffer(rawPdf) ? rawPdf : Buffer.from(rawPdf);
+    if (!pdfBuffer || pdfBuffer.length === 0 || !pdfBuffer.toString('utf8', 0, 5).startsWith('%PDF-')) {
+      return res.status(500).json({ message: 'PDF generation produced invalid output. Try again.' });
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="DELODUR_System_Documentation.pdf"');
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.end(pdfBuffer, 'binary');
+    return;
+  } catch (err) {
+    if (browser) try { await browser.close(); } catch (_) {}
+    console.error('Documentation PDF generation failed:', err);
+    res.status(500).json({ message: 'Failed to generate PDF', error: err.message });
   }
 });
 
@@ -998,6 +1094,196 @@ app.get('/api/stock-items', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('❌ Stock items API error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Lookup tbl_stock by brand number (ALTNO, ALTNO2, or BENZ) for Shipment Checking dropdown
+app.get('/api/stock-items/lookup-brand-number', authenticateToken, async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (!q) {
+      return res.json({ data: [] });
+    }
+    const term = `%${q}%`;
+    const [rows] = await pool.execute(`
+      SELECT DISTINCT ts.ID as stock_id, ts.BENZ as part_no, ts.BRAND as brand, ts.ALTNO, ts.ALTNO2,
+        COALESCE(m.\`DESC\`, ts.REMARKS, '') as description
+      FROM tbl_stock ts
+      LEFT JOIN master m ON ts.BENZ COLLATE utf8mb4_0900_ai_ci = m.BENZ AND ts.BRAND COLLATE utf8mb4_0900_ai_ci = m.BRAND
+      WHERE ts.ALTNO LIKE ? OR ts.ALTNO2 LIKE ? OR ts.BENZ LIKE ? OR REPLACE(ts.BENZ, ' ', '') LIKE ?
+      ORDER BY ts.BRAND, ts.BENZ
+      LIMIT 50
+    `, [term, term, term, term]);
+    res.json({ data: rows });
+  } catch (error) {
+    console.error('Lookup brand number error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Shipment Checking APIs - GET returns description; when no part_no, resolve brand from brand_number and description from brand+brand_number
+app.get('/api/shipment-checking', authenticateToken, async (req, res) => {
+  try {
+    const search = (req.query.search || '').trim().toLowerCase();
+    const coll = 'utf8mb4_0900_ai_ci';
+    const brandFromBrandNumber = `(SELECT ts.BRAND FROM tbl_stock ts WHERE (ts.ALTNO COLLATE ${coll} = sc.brand_number COLLATE ${coll} OR ts.ALTNO2 COLLATE ${coll} = sc.brand_number COLLATE ${coll}) AND ts.BRAND IS NOT NULL AND (TRIM(ts.BRAND) COLLATE ${coll}) != '' LIMIT 1)`;
+    const effectiveBrand = `COALESCE(NULLIF(TRIM(sc.brand), ''), ${brandFromBrandNumber})`;
+    let sql = `SELECT sc.id, sc.quantity, sc.brand_number,
+      ${effectiveBrand} as brand,
+      sc.part_no, sc.status, sc.stock_id, sc.created_at,
+      (CASE
+        WHEN sc.part_no IS NOT NULL AND (TRIM(sc.part_no) COLLATE ${coll}) != '' THEN COALESCE(
+          (SELECT m.\`DESC\` FROM master m WHERE m.BENZ COLLATE ${coll} = sc.part_no COLLATE ${coll} AND m.BRAND COLLATE ${coll} = sc.brand COLLATE ${coll} LIMIT 1),
+          (SELECT REMARKS FROM tbl_stock WHERE BENZ COLLATE ${coll} = sc.part_no COLLATE ${coll} AND BRAND COLLATE ${coll} = sc.brand COLLATE ${coll} LIMIT 1),
+          ''
+        )
+        WHEN (${effectiveBrand} COLLATE ${coll}) != '' AND sc.brand_number IS NOT NULL AND (TRIM(sc.brand_number) COLLATE ${coll}) != '' THEN (
+          SELECT COALESCE(m.\`DESC\`, ts.REMARKS, '')
+          FROM tbl_stock ts
+          LEFT JOIN master m ON m.BENZ COLLATE ${coll} = ts.BENZ COLLATE ${coll} AND m.BRAND COLLATE ${coll} = ts.BRAND COLLATE ${coll}
+          WHERE (ts.ALTNO COLLATE ${coll} = sc.brand_number COLLATE ${coll} OR ts.ALTNO2 COLLATE ${coll} = sc.brand_number COLLATE ${coll})
+            AND ts.BRAND COLLATE ${coll} = (${effectiveBrand} COLLATE ${coll})
+          LIMIT 1
+        )
+        ELSE ''
+      END) as description
+      FROM tbl_shipment_checking sc
+      WHERE 1=1`;
+    const params = [];
+    if (search) {
+      sql += ' AND (LOWER(sc.brand) LIKE ? OR LOWER(sc.brand_number) LIKE ? OR LOWER(sc.part_no) LIKE ?)';
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+    sql += ' ORDER BY sc.created_at DESC';
+    const [rows] = await pool.execute(sql, params);
+    const normalized = (rows || []).map(r => ({
+      ...r,
+      quantity: r.quantity != null ? String(r.quantity) : (r.Quantity != null ? String(r.Quantity) : ''),
+      description: r.description ?? r.DESCRIPTION ?? ''
+    }));
+    res.json({ success: true, data: normalized });
+  } catch (error) {
+    console.error('Shipment checking list error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/shipment-checking', authenticateToken, async (req, res) => {
+  try {
+    const { quantity, brand_number, brand, part_no, status, stock_id } = req.body;
+    const qtyVal = quantity !== undefined && quantity !== null ? String(quantity) : '';
+    const [result] = await pool.execute(
+      `INSERT INTO tbl_shipment_checking (quantity, brand_number, brand, part_no, status, stock_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        qtyVal,
+        brand_number != null ? String(brand_number) : null,
+        brand != null ? String(brand) : null,
+        part_no != null ? String(part_no) : null,
+        status === 'complete' ? 'complete' : 'incomplete',
+        stock_id != null ? parseInt(stock_id, 10) : null
+      ]
+    );
+    const coll = 'utf8mb4_0900_ai_ci';
+    const brandFromBrandNumber = `(SELECT ts.BRAND FROM tbl_stock ts WHERE (ts.ALTNO COLLATE ${coll} = sc.brand_number COLLATE ${coll} OR ts.ALTNO2 COLLATE ${coll} = sc.brand_number COLLATE ${coll}) AND ts.BRAND IS NOT NULL AND (TRIM(ts.BRAND) COLLATE ${coll}) != '' LIMIT 1)`;
+    const effectiveBrand = `COALESCE(NULLIF(TRIM(sc.brand), ''), ${brandFromBrandNumber})`;
+    const [rows] = await pool.execute(
+      `SELECT sc.id, sc.quantity, sc.brand_number, ${effectiveBrand} as brand, sc.part_no, sc.status, sc.stock_id, sc.created_at,
+        (CASE
+          WHEN sc.part_no IS NOT NULL AND (TRIM(sc.part_no) COLLATE ${coll}) != '' THEN COALESCE(
+            (SELECT m.\`DESC\` FROM master m WHERE m.BENZ COLLATE ${coll} = sc.part_no COLLATE ${coll} AND m.BRAND COLLATE ${coll} = sc.brand COLLATE ${coll} LIMIT 1),
+            (SELECT REMARKS FROM tbl_stock WHERE BENZ COLLATE ${coll} = sc.part_no COLLATE ${coll} AND BRAND COLLATE ${coll} = sc.brand COLLATE ${coll} LIMIT 1),
+            ''
+          )
+          WHEN (${effectiveBrand} COLLATE ${coll}) != '' AND sc.brand_number IS NOT NULL AND (TRIM(sc.brand_number) COLLATE ${coll}) != '' THEN (
+            SELECT COALESCE(m.\`DESC\`, ts.REMARKS, '')
+            FROM tbl_stock ts
+            LEFT JOIN master m ON m.BENZ COLLATE ${coll} = ts.BENZ COLLATE ${coll} AND m.BRAND COLLATE ${coll} = ts.BRAND COLLATE ${coll}
+            WHERE (ts.ALTNO COLLATE ${coll} = sc.brand_number COLLATE ${coll} OR ts.ALTNO2 COLLATE ${coll} = sc.brand_number COLLATE ${coll})
+              AND ts.BRAND COLLATE ${coll} = (${effectiveBrand} COLLATE ${coll})
+            LIMIT 1
+          )
+          ELSE ''
+        END) as description
+       FROM tbl_shipment_checking sc
+       WHERE sc.id = ?`,
+      [result.insertId]
+    );
+    const row = rows[0];
+    const normalized = row ? {
+      ...row,
+      quantity: row.quantity != null ? String(row.quantity) : (row.Quantity != null ? String(row.Quantity) : ''),
+      description: row.description ?? row.DESCRIPTION ?? ''
+    } : null;
+    res.status(201).json({ success: true, data: normalized });
+  } catch (error) {
+    console.error('Shipment checking create error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+});
+
+app.patch('/api/shipment-checking/:id', authenticateToken, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { status, quantity } = req.body;
+    if (!['complete', 'incomplete'].includes(status)) {
+      return res.status(400).json({ success: false, message: 'status must be complete or incomplete' });
+    }
+    const qtyVal = quantity !== undefined && quantity !== null ? String(quantity) : '';
+    await pool.execute('UPDATE tbl_shipment_checking SET status = ?, quantity = ? WHERE id = ?', [status, qtyVal, id]);
+    const coll = 'utf8mb4_0900_ai_ci';
+    const brandFromBrandNumber = `(SELECT ts.BRAND FROM tbl_stock ts WHERE (ts.ALTNO COLLATE ${coll} = sc.brand_number COLLATE ${coll} OR ts.ALTNO2 COLLATE ${coll} = sc.brand_number COLLATE ${coll}) AND ts.BRAND IS NOT NULL AND (TRIM(ts.BRAND) COLLATE ${coll}) != '' LIMIT 1)`;
+    const effectiveBrand = `COALESCE(NULLIF(TRIM(sc.brand), ''), ${brandFromBrandNumber})`;
+    const [rows] = await pool.execute(
+      `SELECT sc.id, sc.quantity, sc.brand_number, ${effectiveBrand} as brand, sc.part_no, sc.status, sc.stock_id, sc.created_at,
+        (CASE
+          WHEN sc.part_no IS NOT NULL AND (TRIM(sc.part_no) COLLATE ${coll}) != '' THEN COALESCE(
+            (SELECT m.\`DESC\` FROM master m WHERE m.BENZ COLLATE ${coll} = sc.part_no COLLATE ${coll} AND m.BRAND COLLATE ${coll} = sc.brand COLLATE ${coll} LIMIT 1),
+            (SELECT REMARKS FROM tbl_stock WHERE BENZ COLLATE ${coll} = sc.part_no COLLATE ${coll} AND BRAND COLLATE ${coll} = sc.brand COLLATE ${coll} LIMIT 1),
+            ''
+          )
+          WHEN (${effectiveBrand} COLLATE ${coll}) != '' AND sc.brand_number IS NOT NULL AND (TRIM(sc.brand_number) COLLATE ${coll}) != '' THEN (
+            SELECT COALESCE(m.\`DESC\`, ts.REMARKS, '')
+            FROM tbl_stock ts
+            LEFT JOIN master m ON m.BENZ COLLATE ${coll} = ts.BENZ COLLATE ${coll} AND m.BRAND COLLATE ${coll} = ts.BRAND COLLATE ${coll}
+            WHERE (ts.ALTNO COLLATE ${coll} = sc.brand_number COLLATE ${coll} OR ts.ALTNO2 COLLATE ${coll} = sc.brand_number COLLATE ${coll})
+              AND ts.BRAND COLLATE ${coll} = (${effectiveBrand} COLLATE ${coll})
+            LIMIT 1
+          )
+          ELSE ''
+        END) as description
+       FROM tbl_shipment_checking sc
+       WHERE sc.id = ?`,
+      [id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Not found' });
+    }
+    const row = rows[0];
+    const normalized = {
+      ...row,
+      quantity: row.quantity != null ? String(row.quantity) : (row.Quantity != null ? String(row.Quantity) : ''),
+      description: row.description ?? row.DESCRIPTION ?? ''
+    };
+    res.json({ success: true, data: normalized });
+  } catch (error) {
+    console.error('Shipment checking update error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+});
+
+app.delete('/api/shipment-checking/:id', authenticateToken, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const [result] = await pool.execute('DELETE FROM tbl_shipment_checking WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Not found' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Shipment checking delete error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 });
 
@@ -1859,6 +2145,34 @@ app.post('/api/stock/adjustment', authenticateToken, async (req, res) => {
   }
 });
 
+// Get next adjustment number
+app.get('/api/stock/adjustment/next-number', authenticateToken, async (req, res) => {
+  try {
+    // Check if table exists
+    const [tables] = await pool.execute(`
+      SELECT TABLE_NAME 
+      FROM information_schema.TABLES 
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'stock_adjustments'
+    `, [dbConfig.database]);
+
+    if (tables.length === 0) {
+      // Table doesn't exist yet, return 1 as first number
+      return res.json({ success: true, nextNumber: 1 });
+    }
+
+    // Get the maximum id from stock_adjustments
+    const [result] = await pool.execute(`
+      SELECT COALESCE(MAX(id), 0) as max_id FROM stock_adjustments
+    `);
+
+    const nextNumber = (result[0]?.max_id || 0) + 1;
+    res.json({ success: true, nextNumber });
+  } catch (error) {
+    console.error('❌ Error getting next adjustment number:', error);
+    res.status(500).json({ error: 'Failed to get next adjustment number', details: error.message });
+  }
+});
+
 // Get adjustment history
 app.get('/api/stock/adjustments', authenticateToken, async (req, res) => {
   try {
@@ -2242,6 +2556,23 @@ app.post('/api/stock-requests', authenticateToken, async (req, res) => {
 // List all stock requests (with pagination and search)
 app.get('/api/stock-requests', authenticateToken, cacheMiddleware(5), async (req, res) => {
   try {
+    // Check and add notes column if it doesn't exist
+    try {
+      const [columns] = await pool.execute(`
+        SELECT COUNT(*) as count 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'stock_requests' 
+        AND COLUMN_NAME = 'notes'
+      `);
+      if (columns[0].count === 0) {
+        await pool.execute('ALTER TABLE stock_requests ADD COLUMN notes TEXT');
+        console.log('✅ Added notes column to stock_requests table');
+      }
+    } catch (alterError) {
+      console.error('⚠️ Error checking/adding notes column:', alterError.message);
+    }
+
     const { page, limit, offset } = getPaginationParams(req);
     const search = req.query.search || '';
     let whereClause = 'WHERE 1=1';
@@ -2282,16 +2613,35 @@ app.get('/api/stock-requests', authenticateToken, cacheMiddleware(5), async (req
   }
 });
 
-// Update a stock request status
+// Update a stock request status or notes
 app.put('/api/stock-requests/:id', authenticateToken, async (req, res) => {
   try {
     const id = req.params.id;
-    const { status } = req.body;
-    const sql = `UPDATE stock_requests SET status = ? WHERE id = ?`;
-    const params = [status, id];
+    const { status, notes } = req.body;
+    
+    // Build dynamic update query
+    const updates = [];
+    const params = [];
+    
+    if (status !== undefined) {
+      updates.push('status = ?');
+      params.push(status);
+    }
+    
+    if (notes !== undefined) {
+      updates.push('notes = ?');
+      params.push(notes);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+    
+    params.push(id);
+    const sql = `UPDATE stock_requests SET ${updates.join(', ')} WHERE id = ?`;
     const [result] = await pool.execute(sql, params);
     
-    // Invalidate cache so status change appears immediately
+    // Invalidate cache so changes appear immediately
     invalidateCache('stock-requests');
     
     // Emit WebSocket notification for real-time updates
@@ -3672,7 +4022,7 @@ app.post('/api/warehouse/add-to-order', authenticateToken, async (req, res) => {
     }
     
     // Get customer_name from existing order
-    const conn = await pool.getConnection();
+    const conn = await pool.getConnection();  
     try {
       await conn.beginTransaction();
       
@@ -5423,6 +5773,154 @@ app.get('/api/stock/barcode-scan/:barcode', authenticateToken, async (req, res) 
     console.error('❌ ID scan error:', error);
     res.status(500).json({ 
       message: 'Server error during ID scan', 
+      error: error.message 
+    });
+  }
+});
+
+// Update barcode scan data (updates tbl_stock, tries to update tbl_inmain if found)
+app.put('/api/stock/barcode-scan-update', authenticateToken, async (req, res) => {
+  try {
+    const { stockId, oldBenz, oldBrand, oldOem, newBenz, newBrand, newOem, date, cost, sell } = req.body;
+    
+    console.log('📝 Updating barcode scan data:', { stockId, oldBenz, oldBrand, oldOem, newBenz, newBrand, newOem });
+    
+    if (!stockId) {
+      return res.status(400).json({ message: 'Stock ID is required' });
+    }
+    
+    let stockUpdated = false;
+    let inmainUpdated = false;
+    
+    // STEP 1: Update tbl_stock (primary operation - must succeed)
+    try {
+      const [stockUpdate] = await pool.execute(`
+        UPDATE tbl_stock 
+        SET BENZ = ?, BRAND = ?, ALTNO = ?
+        WHERE ID = ?
+      `, [newBenz, newBrand, newOem, stockId]);
+      
+      stockUpdated = stockUpdate.affectedRows > 0;
+      console.log(stockUpdated ? '✅ Stock table updated:' : '⚠️ No stock record updated:', stockUpdate.affectedRows, 'rows');
+      
+      if (!stockUpdated) {
+        return res.status(404).json({ 
+          success: false,
+          message: 'Stock record not found',
+          stockUpdated: false,
+          inmainUpdated: false
+        });
+      }
+      
+    } catch (error) {
+      console.error('❌ Error updating stock table:', error);
+      return res.status(500).json({ 
+        success: false,
+        message: 'Failed to update stock table',
+        error: error.message 
+      });
+    }
+    
+    // STEP 2: Try to update tbl_inmain (optional operation - can fail without affecting stock update)
+    try {
+      // Check if inmain table exists and has the required fields
+      const [tableCheck] = await pool.execute(`
+        SELECT COUNT(*) as count FROM information_schema.tables 
+        WHERE table_schema = ? AND table_name = 'inmain'
+      `, [dbConfig.database]);
+      
+      if (tableCheck[0].count > 0) {
+        const [fieldsCheck] = await pool.execute(`
+          SELECT COLUMN_NAME FROM information_schema.columns 
+          WHERE table_schema = ? AND table_name = 'inmain'
+        `, [dbConfig.database]);
+        
+        const fieldNames = fieldsCheck.map(f => f.COLUMN_NAME);
+        const hasBenz = fieldNames.includes('BENZ');
+        const hasBrand = fieldNames.includes('BRAND');
+        const hasDate = fieldNames.includes('DATE');
+        const hasCost = fieldNames.includes('COST') || fieldNames.includes('COST_PRICE') || fieldNames.includes('PRICE');
+        const hasSell = fieldNames.includes('SELL') || fieldNames.includes('SELL_PRICE') || fieldNames.includes('SELLING_PRICE');
+        
+        if (hasBenz && hasBrand && hasDate && hasCost && hasSell) {
+          const costField = fieldNames.includes('COST') ? 'COST' : 
+                          fieldNames.includes('COST_PRICE') ? 'COST_PRICE' : 
+                          fieldNames.includes('PRICE') ? 'PRICE' : 'COST';
+          
+          const sellField = fieldNames.includes('SELL') ? 'SELL' : 
+                          fieldNames.includes('SELL_PRICE') ? 'SELL_PRICE' : 
+                          fieldNames.includes('SELLING_PRICE') ? 'SELLING_PRICE' : 'SELL';
+          
+          // Build WHERE clause to find the matching inmain record using old values
+          const whereConditions = [];
+          const whereParams = [];
+          
+          if (oldBenz) {
+            whereConditions.push('BENZ = ?');
+            whereParams.push(oldBenz);
+          }
+          
+          if (date) {
+            whereConditions.push('DATE = ?');
+            whereParams.push(date);
+          }
+          
+          if (cost) {
+            whereConditions.push(`${costField} = ?`);
+            whereParams.push(cost);
+          }
+          
+          if (sell) {
+            whereConditions.push(`${sellField} = ?`);
+            whereParams.push(sell);
+          }
+          
+          if (oldBrand) {
+            whereConditions.push('BRAND = ?');
+            whereParams.push(oldBrand);
+          }
+          
+          if (whereConditions.length > 0) {
+            const whereClause = 'WHERE ' + whereConditions.join(' AND ');
+            
+            console.log('🔍 Searching inmain with WHERE clause:', whereClause);
+            console.log('🔍 Parameters:', whereParams);
+            
+            // Update inmain record with new values
+            const updateParams = [...whereParams];
+            const [inmainUpdate] = await pool.execute(`
+              UPDATE inmain 
+              SET BENZ = ?, BRAND = ?
+              ${whereClause}
+            `, [newBenz, newBrand, ...updateParams]);
+            
+            inmainUpdated = inmainUpdate.affectedRows > 0;
+            console.log(inmainUpdated ? '✅ Inmain table updated:' : '⚠️ No inmain record found (skipped)', inmainUpdate.affectedRows, 'rows');
+          }
+        } else {
+          console.log('⚠️ Inmain table missing required fields, skipping update');
+        }
+      } else {
+        console.log('⚠️ Inmain table does not exist, skipping update');
+      }
+    } catch (error) {
+      // Log the error but don't fail the entire operation since stock was updated successfully
+      console.error('⚠️ Error updating inmain table (non-critical):', error.message);
+    }
+    
+    // Return success since stock update succeeded (inmain is optional)
+    res.json({ 
+      success: true, 
+      message: stockUpdated ? 'Stock updated successfully' : 'Update completed',
+      stockUpdated: stockUpdated,
+      inmainUpdated: inmainUpdated
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in barcode scan update:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Failed to update data', 
       error: error.message 
     });
   }
@@ -8314,15 +8812,17 @@ app.get('/api/inmain', authenticateToken, async (req, res) => {
 app.get('/api/inmain/history/:benz', authenticateToken, async (req, res) => {
   try {
     const { benz } = req.params;
+    const { qty_filter = 'has_stock' } = req.query; // 'has_stock' (QTY > 0) or 'all' (all records)
+    const code = (benz || '').trim(); // generic code: can be BENZ (part no.) or ALTNO (OEM)
     
-    if (!benz || benz.trim() === '') {
+    if (!code) {
       return res.status(400).json({
-        error: 'Part number (BENZ) is required',
-        message: 'Please provide a valid part number'
+        error: 'Part number or OEM number is required',
+        message: 'Please provide a valid part number or OEM number'
       });
     }
     
-    console.log(`📋 Fetching stock history for part number: ${benz}`);
+    console.log(`📋 Fetching stock history for code: ${code} (filter: ${qty_filter})`);
     
     const connection = await pool.getConnection();
     try {
@@ -8331,6 +8831,10 @@ app.get('/api/inmain/history/:benz', authenticateToken, async (req, res) => {
       // Join with inmain to get supplier information and proper DATE values
       // Note: We get DATE from inmain table first (which has proper DATE type), 
       // then fall back to tbl_stock.DATE if no match found
+      
+      // OPTIMIZATION: Add QTY filter to speed up query
+      // Only fetch records with QTY > 0 by default (much faster)
+      const qtyCondition = qty_filter === 'has_stock' ? 'AND ts.QTY > 0' : '';
       
       // First, check what columns exist in inmain table
       const [inmainColumns] = await connection.execute(`
@@ -8366,7 +8870,10 @@ app.get('/api/inmain/history/:benz', authenticateToken, async (req, res) => {
                     NULL
                 END
                FROM inmain im 
-               WHERE (im.\`${inmainBenzCol}\` = ts.BENZ OR REPLACE(im.\`${inmainBenzCol}\`, ' ', '') = REPLACE(ts.BENZ, ' ', ''))
+               WHERE (
+                  im.\`${inmainBenzCol}\` = ts.BENZ 
+                  OR REPLACE(im.\`${inmainBenzCol}\`, ' ', '') = REPLACE(ts.BENZ, ' ', '')
+               )
                  AND im.\`${inmainBrandCol}\` = ts.BRAND 
                ORDER BY 
                  CASE 
@@ -8395,7 +8902,10 @@ app.get('/api/inmain/history/:benz', authenticateToken, async (req, res) => {
             COALESCE(
               (SELECT im.\`${inmainSupplierCol}\` 
                FROM inmain im 
-               WHERE (im.\`${inmainBenzCol}\` = ts.BENZ OR REPLACE(im.\`${inmainBenzCol}\`, ' ', '') = REPLACE(ts.BENZ, ' ', ''))
+               WHERE (
+                  im.\`${inmainBenzCol}\` = ts.BENZ 
+                  OR REPLACE(im.\`${inmainBenzCol}\`, ' ', '') = REPLACE(ts.BENZ, ' ', '')
+               )
                  AND im.\`${inmainBrandCol}\` = ts.BRAND 
                ORDER BY 
                  CASE 
@@ -8410,15 +8920,16 @@ app.get('/api/inmain/history/:benz', authenticateToken, async (req, res) => {
               'N/A'
             ) as SUPPLIER
           FROM tbl_stock ts
-          WHERE ts.BENZ = ?
+          WHERE (ts.BENZ = ? OR ts.ALTNO = ?)
+          ${qtyCondition}
         ) as result
         ORDER BY DATE IS NULL, DATE DESC, ID DESC
         LIMIT 1000
       `;
       
-      const [rows] = await connection.execute(query, [benz.trim()]);
+      const [rows] = await connection.execute(query, [code, code]);
       
-      console.log(`✅ Found ${rows.length} stock records for part number: ${benz}`);
+      console.log(`✅ Found ${rows.length} stock records for code: ${code}`);
       
       connection.release();
       
@@ -8426,7 +8937,7 @@ app.get('/api/inmain/history/:benz', authenticateToken, async (req, res) => {
         success: true,
         data: rows,
         count: rows.length,
-        partNumber: benz
+        partNumber: code
       });
       
     } catch (dbError) {
@@ -8931,6 +9442,189 @@ app.get('/api/inc_tbl/by-tab/:tabNumber', authenticateToken, async (req, res) =>
       success: false,
       error: 'Failed to fetch items by tab', 
       message: error.message 
+    });
+  }
+});
+
+// Get tab names
+app.get('/api/incoming/tab-names', authenticateToken, async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    try {
+      // Check if incoming_tab_names table exists, create if not
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS incoming_tab_names (
+          tab_number INT PRIMARY KEY,
+          tab_name VARCHAR(50) NOT NULL DEFAULT '',
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          updated_by VARCHAR(100)
+        )
+      `);
+
+      // Fetch all tab names
+      const [rows] = await connection.execute(`
+        SELECT tab_number, tab_name 
+        FROM incoming_tab_names
+        ORDER BY tab_number
+      `);
+
+      // Convert to object format {1: "Tab 1", 2: "Tab 2", ...}
+      const tabNames = {};
+      rows.forEach(row => {
+        tabNames[row.tab_number] = row.tab_name || `Tab ${row.tab_number}`;
+      });
+
+      // Ensure all tabs 1-10 have entries
+      for (let i = 1; i <= 10; i++) {
+        if (!tabNames[i]) {
+          tabNames[i] = `Tab ${i}`;
+          // Insert default name
+          await connection.execute(`
+            INSERT INTO incoming_tab_names (tab_number, tab_name, updated_by)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE tab_name = VALUES(tab_name)
+          `, [i, `Tab ${i}`, req.user?.username || 'system']);
+        }
+      }
+
+      res.json({
+        success: true,
+        data: tabNames
+      });
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('❌ Error fetching tab names:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch tab names',
+      message: error.message
+    });
+  }
+});
+
+// Save/Update tab name
+app.put('/api/incoming/tab-names', authenticateToken, async (req, res) => {
+  try {
+    const { tabNumber, tabName } = req.body;
+
+    if (!tabNumber || tabNumber < 1 || tabNumber > 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid tab number. Must be between 1 and 10.'
+      });
+    }
+
+    if (!tabName || typeof tabName !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid tab name.'
+      });
+    }
+
+    const connection = await pool.getConnection();
+    try {
+      // Ensure table exists
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS incoming_tab_names (
+          tab_number INT PRIMARY KEY,
+          tab_name VARCHAR(50) NOT NULL DEFAULT '',
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          updated_by VARCHAR(100)
+        )
+      `);
+
+      // Insert or update tab name
+      await connection.execute(`
+        INSERT INTO incoming_tab_names (tab_number, tab_name, updated_by)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE 
+          tab_name = VALUES(tab_name),
+          updated_at = CURRENT_TIMESTAMP,
+          updated_by = VALUES(updated_by)
+      `, [tabNumber, tabName.trim() || `Tab ${tabNumber}`, req.user?.username || 'system']);
+
+      res.json({
+        success: true,
+        message: 'Tab name saved successfully',
+        data: {
+          tabNumber,
+          tabName: tabName.trim() || `Tab ${tabNumber}`
+        }
+      });
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('❌ Error saving tab name:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to save tab name',
+      message: error.message
+    });
+  }
+});
+
+// Clear all items for a specific tab
+app.delete('/api/inc_tbl/clear-tab/:tabNumber', authenticateToken, async (req, res) => {
+  try {
+    const { tabNumber } = req.params;
+    const tabNum = parseInt(tabNumber);
+
+    if (isNaN(tabNum) || tabNum < 1 || tabNum > 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid tab number. Must be between 1 and 10.'
+      });
+    }
+
+    console.log(`🗑️ Clearing all items for tab ${tabNum}...`);
+
+    const connection = await pool.getConnection();
+    try {
+      // Check if inc_tbl table exists
+      const [tableCheck] = await connection.execute(`
+        SELECT COUNT(*) as count FROM information_schema.tables 
+        WHERE table_schema = ? AND table_name = 'inc_tbl'
+      `, [dbConfig.database]);
+
+      if (tableCheck[0].count === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'inc_tbl table not found',
+          message: 'The inc_tbl table does not exist in the database'
+        });
+      }
+
+      // Get count before deletion
+      const [countResult] = await connection.execute(`
+        SELECT COUNT(*) as count FROM inc_tbl WHERE tab_number = ?
+      `, [tabNum]);
+
+      const deletedCount = countResult[0].count;
+
+      // Delete all items for this tab
+      await connection.execute(`
+        DELETE FROM inc_tbl WHERE tab_number = ?
+      `, [tabNum]);
+
+      console.log(`✅ Deleted ${deletedCount} items from tab ${tabNum}`);
+
+      res.json({
+        success: true,
+        message: `Successfully cleared ${deletedCount} item(s) from tab ${tabNum}`,
+        deletedCount
+      });
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error(`❌ Error clearing items for tab ${req.params.tabNumber}:`, error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to clear tab items',
+      message: error.message
     });
   }
 });
@@ -9726,7 +10420,8 @@ app.get('/api/dashboard/yesterday-sales', authenticateToken, async (req, res) =>
 // Daily Sales Graph Data
 app.get('/api/dashboard/daily-sales', authenticateToken, async (req, res) => {
   try {
-    // Get daily sales data for the last 30 days
+    // Get daily sales data for the last 30 days from today
+    // Match SalesHistory logic: exclude adjustments and handle refunds (negative QTY)
     const [rows] = await pool.execute(`
       SELECT 
         DATE as sale_date,
@@ -9735,30 +10430,60 @@ app.get('/api/dashboard/daily-sales', authenticateToken, async (req, res) => {
         SUM(QTY * SELL) as total_value,
         COUNT(DISTINCT IDCODE) as unique_items_sold
       FROM history 
-      WHERE DATE >= DATE_SUB((SELECT MAX(DATE) FROM history WHERE DATE >= '2020-01-01' AND DATE <= '2025-12-31'), INTERVAL 30 DAY)
-        AND DATE <= (SELECT MAX(DATE) FROM history WHERE DATE >= '2020-01-01' AND DATE <= '2025-12-31')
+      WHERE DATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+        AND DATE <= CURDATE()
         AND DATE IS NOT NULL
+        AND (RECEIPT != 'ADJUSTMENT' OR RECEIPT IS NULL)
+        AND (INVOICE != 'ADJUSTMENT' OR INVOICE IS NULL)
       GROUP BY DATE
       ORDER BY DATE ASC
     `);
 
+    // Calculate date range: last 30 days from today
+    // Use database CURDATE() to ensure consistency with query
+    const [dateResult] = await pool.execute('SELECT CURDATE() as today, DATE_SUB(CURDATE(), INTERVAL 29 DAY) as start_date');
+    const today = new Date(dateResult[0].today);
+    const startDate = new Date(dateResult[0].start_date);
+    
+    // Normalize dates to YYYY-MM-DD format (no time component)
+    const formatDate = (date) => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
     // Fill in missing dates with zero values
     const dailySales = [];
-    const maxDate = new Date(Math.max(...rows.map(row => new Date(row.sale_date))));
-    const minDate = new Date(Math.max(...rows.map(row => new Date(row.sale_date))));
-    minDate.setDate(minDate.getDate() - 29); // 30 days total
-
-    for (let d = new Date(minDate); d <= maxDate; d.setDate(d.getDate() + 1)) {
-      const dateStr = d.toISOString().split('T')[0];
-      const existingData = rows.find(row => row.sale_date.toISOString().split('T')[0] === dateStr);
+    const currentDate = new Date(startDate);
+    
+    while (currentDate <= today) {
+      const dateStr = formatDate(currentDate);
+      
+      // Find matching data from query results
+      const existingData = rows.find(row => {
+        // Handle both Date objects and date strings from database
+        let rowDate;
+        if (row.sale_date instanceof Date) {
+          rowDate = formatDate(row.sale_date);
+        } else {
+          // Convert to string and extract date part (YYYY-MM-DD)
+          const rowDateStr = String(row.sale_date);
+          rowDate = rowDateStr.split('T')[0].split(' ')[0];
+        }
+        return rowDate === dateStr;
+      });
       
       dailySales.push({
         date: dateStr,
-        total_transactions: existingData ? existingData.total_transactions : 0,
-        total_quantity: existingData ? existingData.total_quantity : 0,
-        total_value: existingData ? parseFloat(existingData.total_value) : 0,
-        unique_items_sold: existingData ? existingData.unique_items_sold : 0
+        total_transactions: existingData ? parseInt(existingData.total_transactions) || 0 : 0,
+        total_quantity: existingData ? parseInt(existingData.total_quantity) || 0 : 0,
+        total_value: existingData ? parseFloat(existingData.total_value) || 0 : 0,
+        unique_items_sold: existingData ? parseInt(existingData.unique_items_sold) || 0 : 0
       });
+      
+      // Move to next day
+      currentDate.setDate(currentDate.getDate() + 1);
     }
 
     res.json(dailySales);
@@ -9769,6 +10494,48 @@ app.get('/api/dashboard/daily-sales', authenticateToken, async (req, res) => {
 });
 
 // Sales History API Endpoints
+
+// Get available years for a part number (fast query - just gets distinct years)
+app.get('/api/sales/history/years', authenticateToken, async (req, res) => {
+  try {
+    const { search } = req.query;
+    
+    if (!search) {
+      return res.status(400).json({ error: 'Search parameter is required' });
+    }
+    
+    let whereConditions = [];
+    let queryParams = [];
+    
+    // Build WHERE clause for part number search
+    const trimmedSearch = search.trim().replace(/\s+/g, ' ');
+    const searchWithSpaces = `%${trimmedSearch}%`;
+    const searchWithoutSpaces = `%${trimmedSearch.replace(/\s+/g, '')}%`;
+    
+    whereConditions.push(`(h.BENZ LIKE ? OR h.ALTNO LIKE ? OR REPLACE(h.BENZ, ' ', '') LIKE ?)`);
+    queryParams.push(searchWithSpaces, searchWithSpaces, searchWithoutSpaces);
+    
+    const whereClause = `WHERE ${whereConditions.join(' AND ')} AND h.DATE IS NOT NULL`;
+    
+    // Fast query - just get distinct years
+    const [rows] = await pool.query(`
+      SELECT DISTINCT YEAR(h.DATE) as year
+      FROM history h
+      ${whereClause}
+      ORDER BY year DESC
+    `, queryParams);
+    
+    const years = rows.map(row => row.year.toString());
+    
+    res.json({
+      success: true,
+      years: years
+    });
+  } catch (error) {
+    console.error('Error fetching available years:', error);
+    res.status(500).json({ error: 'Failed to fetch available years' });
+  }
+});
 
 // Get sales history with pagination and filters
 app.get('/api/sales/history', authenticateToken, async (req, res) => {
@@ -10098,20 +10865,32 @@ app.get('/api/sales/export-dbf', authenticateToken, async (req, res) => {
       // Truncate receipt to 10 characters
       const receiptValue = String(row.RECEIPT || '').substring(0, 10);
       
+      // Check if this is an ADJUSTMENT record
+      const isAdjustment = (receiptValue.trim() === 'ADJUSTMENT');
+      
+      // For refunded items (QTY < 0), keep SELL positive but QTY remains negative.
+      // For ADJUSTMENT records, SELL must be 0.00 in the exported DBF (price-only stock movement).
+      const rawSellValue = Math.abs(parseFloat(row.SELL) || 0); // Always positive
+      const sellValue = isAdjustment ? 0 : rawSellValue;
+      const qtyValue = parseInt(row.QTY) || 0; // Can be negative for refunds
+      
+      // For ADJUSTMENT records, COST should be 0
+      const costValue = isAdjustment ? 0 : (parseFloat(row.COST) || 0);
+      
       return {
         CUSTOMER: customerName.padEnd(10, ' ').substring(0, 10),
         DATE: dateValue, // Date type (YYYYMMDD format, 8 bytes)
         RECEIPT: receiptValue.padEnd(10, ' ').substring(0, 10),
         INVOICE: invoiceLogical, // Logical type (true/false)
         IDCODE: parseInt(row.IDCODE) || 0, // Numeric, 6 digits
-        SELL: parseFloat(row.SELL) || 0, // Numeric, 9 digits, 2 decimals
-        QTY: parseInt(row.QTY) || 0, // Numeric, 5 digits
+        SELL: sellValue, // Numeric, 9 digits, 2 decimals - always positive
+        QTY: qtyValue, // Numeric, 5 digits - can be negative for refunds
         BENZ: String(row.BENZ || '').padEnd(16, ' ').substring(0, 16),
         BRAND: String(row.BRAND || '').padEnd(12, ' ').substring(0, 12),
         ALTNO: String(row.ALTNO || '').padEnd(20, ' ').substring(0, 20),
         COLORCODE: String(row.COLORCODE || '').padEnd(4, ' ').substring(0, 4),
         REMARKS: String(row.REMARKS || '').substring(0, 1).padEnd(1, ' '), // Only 1 char!
-        COST: parseFloat(row.COST) || 0 // Numeric, 9 digits, 2 decimals
+        COST: costValue // Numeric, 9 digits, 2 decimals - 0 for ADJUSTMENT records
         // Note: MARIOSO fields will be added manually in binary format after dbffile creates the base structure
       };
     });
@@ -10937,9 +11716,11 @@ app.delete('/api/sales/history/:idcode', authenticateToken, async (req, res) => 
       }
       
       const record = records[0];
-      const quantityToRestore = record.QTY || qty;
+      // For adjustments (RECEIPT = 'ADJUSTMENT'), use absolute value to restore positive quantity
+      const isAdjustment = (record.RECEIPT === 'ADJUSTMENT' || record.INVOICE === 'ADJUSTMENT');
+      const quantityToRestore = isAdjustment ? Math.abs(record.QTY || qty) : (record.QTY || qty);
       
-      console.log(`🔄 Deleting sales history record: ID ${idcode}, Date ${date}, Qty ${quantityToRestore}`);
+      console.log(`🔄 Deleting sales history record: ID ${idcode}, Date ${date}, Qty ${quantityToRestore}${isAdjustment ? ' (adjustment, using absolute value)' : ''}`);
       
       // Conditionally restore quantity to tbl_stock based on return_to_stock flag
       if (return_to_stock) {
@@ -13054,6 +13835,184 @@ app.delete('/api/audit/sessions/:id', authenticateToken, async (req, res) => {
       success: false,
       message: 'Failed to delete audit session',
       error: error.message
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ========================================
+// P.O (Purchase Order) API ENDPOINTS
+// ========================================
+
+// Get all P.O data
+app.get('/api/po', authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    
+    // Check if table exists, if not create it
+    const [tables] = await connection.execute("SHOW TABLES LIKE 'po_data'");
+    if (tables.length === 0) {
+      // Create table if it doesn't exist
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS po_data (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          part_number VARCHAR(100),
+          brand VARCHAR(100),
+          description TEXT,
+          qty INT DEFAULT 0,
+          ts DECIMAL(10,2) DEFAULT NULL,
+          dl DECIMAL(10,2) DEFAULT NULL,
+          others DECIMAL(10,2) DEFAULT NULL,
+          po_no VARCHAR(100),
+          remarks TEXT,
+          benz2 VARCHAR(50) DEFAULT NULL,
+          benz3 VARCHAR(50) DEFAULT NULL,
+          oem VARCHAR(100) DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_part_number (part_number),
+          INDEX idx_brand (brand),
+          INDEX idx_po_no (po_no),
+          INDEX idx_description (description(255)),
+          INDEX idx_benz2 (benz2),
+          INDEX idx_benz3 (benz3),
+          INDEX idx_oem (oem)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+    }
+    
+    const [rows] = await connection.execute(`
+      SELECT * FROM po_data 
+      ORDER BY created_at DESC
+    `);
+    
+    res.json({
+      success: true,
+      data: rows
+    });
+  } catch (error) {
+    console.error('❌ Error fetching P.O data:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch P.O data',
+      message: error.message
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Import P.O data from Excel
+app.post('/api/po/import', authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    console.log('📥 P.O Import request received');
+    const { data } = req.body;
+    
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      console.log('❌ No data provided for import');
+      return res.status(400).json({
+        success: false,
+        error: 'No data provided for import'
+      });
+    }
+    
+    console.log(`📊 Importing ${data.length} records...`);
+    console.log('📋 First record sample:', JSON.stringify(data[0], null, 2));
+    
+    connection = await pool.getConnection();
+    
+    // Check if table exists, if not create it
+    const [tables] = await connection.execute("SHOW TABLES LIKE 'po_data'");
+    if (tables.length === 0) {
+      await connection.execute(`
+        CREATE TABLE IF NOT EXISTS po_data (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          part_number VARCHAR(100),
+          brand VARCHAR(100),
+          description TEXT,
+          qty INT DEFAULT 0,
+          ts DECIMAL(10,2) DEFAULT NULL,
+          dl DECIMAL(10,2) DEFAULT NULL,
+          others DECIMAL(10,2) DEFAULT NULL,
+          po_no VARCHAR(100),
+          remarks TEXT,
+          benz2 VARCHAR(50) DEFAULT NULL,
+          benz3 VARCHAR(50) DEFAULT NULL,
+          oem VARCHAR(100) DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_part_number (part_number),
+          INDEX idx_brand (brand),
+          INDEX idx_po_no (po_no),
+          INDEX idx_description (description(255)),
+          INDEX idx_benz2 (benz2),
+          INDEX idx_benz3 (benz3),
+          INDEX idx_oem (oem)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+    }
+    
+    let successCount = 0;
+    let errorCount = 0;
+    const errors = [];
+    
+    // Insert data in batches
+    const batchSize = 100;
+    for (let i = 0; i < data.length; i += batchSize) {
+      const batch = data.slice(i, i + batchSize);
+      console.log(`📦 Processing batch ${Math.floor(i / batchSize) + 1} (${batch.length} items)...`);
+      
+      for (let j = 0; j < batch.length; j++) {
+        const item = batch[j];
+        try {
+          await connection.execute(`
+            INSERT INTO po_data (
+              part_number, brand, description, qty, ts, dl, others, po_no, remarks, benz2, benz3, oem
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `, [
+            item.part_number || null,
+            item.brand || null,
+            item.description || null,
+            item.qty || 0,
+            item.ts || null,
+            item.dl || null,
+            item.others || null,
+            item.po_no || null,
+            item.remarks || null,
+            item.benz2 || null,
+            item.benz3 || null,
+            item.oem || null
+          ]);
+          successCount++;
+        } catch (error) {
+          console.error(`❌ Error inserting P.O item ${i + j + 1}:`, error.message);
+          console.error('Item data:', JSON.stringify(item, null, 2));
+          errorCount++;
+          if (errors.length < 5) {
+            errors.push({ row: i + j + 1, error: error.message, item: item.part_number || 'N/A' });
+          }
+        }
+      }
+    }
+    
+    console.log(`✅ Import completed: ${successCount} successful, ${errorCount} errors`);
+    
+    res.json({
+      success: true,
+      count: successCount,
+      errors: errorCount,
+      errorDetails: errors.length > 0 ? errors : undefined,
+      message: `Successfully imported ${successCount} records${errorCount > 0 ? `, ${errorCount} errors` : ''}`
+    });
+  } catch (error) {
+    console.error('❌ Error importing P.O data:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to import P.O data',
+      message: error.message
     });
   } finally {
     if (connection) connection.release();

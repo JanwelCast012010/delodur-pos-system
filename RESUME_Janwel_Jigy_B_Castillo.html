@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Castillo, Janwel Jigy B. - Resume</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.4;
+            color: #333;
+            background: white;
+            padding: 20px;
+        }
+        
+        .resume-container {
+            max-width: 8.5in;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+        }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+        
+        .header-left {
+            flex: 1;
+        }
+        
+        .name {
+            font-size: 20px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .contact-details {
+            font-size: 11px;
+            line-height: 1.6;
+        }
+        
+        .photo-placeholder {
+            width: 120px;
+            height: 150px;
+            border: 2px solid #ccc;
+            background: #f5f5f5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: #999;
+            text-align: center;
+        }
+        
+        .section {
+            margin-bottom: 12px;
+        }
+        
+        .section-title {
+            background: #0066cc;
+            color: white;
+            padding: 5px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        
+        .section-content {
+            font-size: 11px;
+            line-height: 1.5;
+            padding: 0 5px;
+        }
+        
+        .personal-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 5px 20px;
+            font-size: 11px;
+        }
+        
+        .personal-info div {
+            display: flex;
+        }
+        
+        .personal-info strong {
+            min-width: 120px;
+            margin-right: 5px;
+        }
+        
+        .education-item, .work-item {
+            margin-bottom: 10px;
+        }
+        
+        .education-item strong, .work-item strong {
+            font-size: 11px;
+            color: #333;
+        }
+        
+        .education-item div, .work-item div {
+            font-size: 11px;
+            margin-left: 10px;
+            margin-top: 2px;
+        }
+        
+        .work-item .company {
+            color: #0066cc;
+            font-weight: 600;
+        }
+        
+        .skills-list {
+            font-size: 11px;
+            line-height: 1.6;
+        }
+        
+        .skills-list ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        
+        .skills-list li {
+            padding: 2px 0;
+            padding-left: 15px;
+            position: relative;
+        }
+        
+        .skills-list li:before {
+            content: "•";
+            position: absolute;
+            left: 0;
+        }
+        
+        .references-item {
+            margin-bottom: 10px;
+        }
+        
+        .references-item strong {
+            font-size: 11px;
+            color: #333;
+        }
+        
+        .references-item div {
+            font-size: 11px;
+            margin-left: 10px;
+            margin-top: 2px;
+        }
+        
+        @media print {
+            body {
+                padding: 0;
+            }
+            .resume-container {
+                padding: 15px;
+            }
+            @page {
+                margin: 0.5in;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="resume-container">
+        <div class="header">
+            <div class="header-left">
+                <div class="name">Castillo, Janwel Jigy B.</div>
+                <div class="contact-details">
+                    <div><strong>Address:</strong> 3rd St. Sitio Tibagan Brgy. Dolores Taytay, Rizal</div>
+                    <div><strong>Phone Number:</strong> 09477096814</div>
+                    <div><strong>Email Address:</strong> janweljigycastillo20@gmail.com</div>
+                </div>
+            </div>
+            <div class="photo-placeholder">
+                [Photo Placeholder]<br>
+                2x2 Picture
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Objective</div>
+            <div class="section-content">
+                To obtain a position that will enable me to use my skills, knowledge, educational background and ability to work with other people in the field of Information Technology and System Development.
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Personal Information</div>
+            <div class="section-content">
+                <div class="personal-info">
+                    <div><strong>Nickname:</strong> Janwel</div>
+                    <div><strong>Date of Birth:</strong> [Your Date of Birth]</div>
+                    <div><strong>Place of Birth:</strong> Taytay, Rizal</div>
+                    <div><strong>Age:</strong> [Your Age] years old</div>
+                    <div><strong>Gender:</strong> Male</div>
+                    <div><strong>Height:</strong> [Your Height]</div>
+                    <div><strong>Marital Status:</strong> Single</div>
+                    <div><strong>Nationality:</strong> Filipino</div>
+                    <div><strong>Language:</strong> Tagalog and English</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Educational Attainment</div>
+            <div class="section-content">
+                <div class="education-item">
+                    <strong>University of Rizal System - Binangonan</strong>
+                    <div>Location: Binangonan, Rizal</div>
+                    <div>Degree/Course: Bachelor of Science in Information Technology</div>
+                    <div>Years: 2020 - 2024</div>
+                </div>
+                <div class="education-item">
+                    <strong>Morong National Senior High School</strong>
+                    <div>Location: Morong, Rizal</div>
+                    <div>Degree/Course: Senior High School - General Academic Strand</div>
+                    <div>Years: 2018 - 2020</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Work Experience</div>
+            <div class="section-content">
+                <div class="work-item">
+                    <strong>IT Specialist</strong>
+                    <div class="company">German Motors - Delodur Corp.</div>
+                    <div>Location: #10 Calle Industria, Bagumbayan, Quezon City</div>
+                    <div>Dates: March 2024 - Present</div>
+                    <div style="margin-top: 5px; font-size: 10px;">
+                        • Developed and deployed web-based POS system replacing legacy MS-DOS system<br>
+                        • Migrated almost a million inventory records to MySQL database<br>
+                        • Built 15+ integrated modules (inventory, sales, service orders, reporting)<br>
+                        • Configured and maintained LAN/WAN infrastructure (50+ devices)<br>
+                        • Installed and maintained desktops, printers, diagnostic systems<br>
+                        • Processed Purchase Orders for office equipment and IT supplies
+                    </div>
+                </div>
+                <div class="work-item">
+                    <strong>IT Staff</strong>
+                    <div class="company">Department of Health (CaLaBaRZon)</div>
+                    <div>Dates: January 2024 - April 2024</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Skills and Interest</div>
+            <div class="section-content">
+                <div class="skills-list">
+                    <ul>
+                        <li>Proficient in JavaScript, React.js, Node.js, Express.js, MySQL, C#, HTML5, CSS3</li>
+                        <li>Experienced in full-stack web application development and system modernization</li>
+                        <li>Skilled in network infrastructure management (LAN/WAN, Wi-Fi configuration)</li>
+                        <li>Knowledgeable in database design, migration, and optimization</li>
+                        <li>Familiar with AI tools (Cursor AI) for development productivity</li>
+                        <li>Hard-working, team player, and willing to learn new technologies</li>
+                        <li>Can perform multiple IT-related tasks and adapt to different work environments</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Character References</div>
+            <div class="section-content">
+                <div class="references-item">
+                    <strong>Yvana Louise A. Verano</strong>
+                    <div>Computer Programmer I</div>
+                    <div>Department of Health</div>
+                    <div>E. Abad Santos St. Marikina City</div>
+                    <div>09620762457</div>
+                </div>
+                <div class="references-item">
+                    <strong>Julius Cesar D. Balbiro</strong>
+                    <div>Senior Consultant</div>
+                    <div>Oracle Philippines</div>
+                    <div>09992276695</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

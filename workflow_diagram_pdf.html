@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DELODUR Inventory System - Workflow Diagram</title>
+    <style>
+        @media print {
+            body { margin: 0; }
+            .diagram-container { box-shadow: none; }
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            background-color: white;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        
+        .diagram-container {
+            background-color: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            max-width: 800px;
+            width: 100%;
+        }
+        
+        .title {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        .workflow {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        .box {
+            background-color: #4CAF50;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            min-width: 150px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        
+        .decision-box {
+            background-color: #FF9800;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            min-width: 150px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        
+        .service-box {
+            background-color: #2196F3;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            min-width: 150px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        
+        .cashier-box {
+            background-color: #9C27B0;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            min-width: 150px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        
+        .history-box {
+            background-color: #607D8B;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            min-width: 150px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        
+        .arrow {
+            font-size: 24px;
+            color: #333;
+            font-weight: bold;
+        }
+        
+        .branch-container {
+            display: flex;
+            gap: 40px;
+            align-items: flex-start;
+        }
+        
+        .branch {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        .decision-branch {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        
+        .yes-no {
+            font-size: 14px;
+            color: #666;
+            font-weight: bold;
+        }
+        
+        .return-path {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        .convergence {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="diagram-container">
+        <div class="title">Complete System Workflow</div>
+        
+        <div class="workflow">
+            <!-- Start -->
+            <div class="box">Counter/Sales</div>
+            <div class="arrow">↓</div>
+            
+            <!-- Warehouse -->
+            <div class="box">Warehouse Page</div>
+            <div class="arrow">↓</div>
+            
+            <!-- Order Type Decision -->
+            <div class="decision-box">Order Type?</div>
+            
+            <!-- Branching -->
+            <div class="branch-container">
+                <div class="branch">
+                    <div class="yes-no">Direct Sale</div>
+                    <div class="arrow">↓</div>
+                    <div class="box">Direct Sale</div>
+                    <div class="arrow">↓</div>
+                    <div class="cashier-box">Cashier Page</div>
+                </div>
+                
+                <div class="branch">
+                    <div class="yes-no">Service Work</div>
+                    <div class="arrow">↓</div>
+                    <div class="service-box">Service Page</div>
+                    <div class="arrow">↓</div>
+                    <div class="decision-box">Item Needed?</div>
+                    
+                    <div class="decision-branch">
+                        <div class="return-path">
+                            <div class="yes-no">Yes</div>
+                            <div class="arrow">↓</div>
+                            <div class="cashier-box">Cashier Page</div>
+                        </div>
+                        
+                        <div class="return-path">
+                            <div class="yes-no">No</div>
+                            <div class="arrow">↓</div>
+                            <div class="box">Return to Stock</div>
+                            <div class="arrow">↓</div>
+                            <div class="box">Stock Updated</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Convergence -->
+            <div class="convergence">
+                <div class="arrow">↓</div>
+                <div class="box">Payment Processing</div>
+                <div class="arrow">↓</div>
+                <div class="history-box">Sales History</div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

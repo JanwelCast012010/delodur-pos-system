@@ -1,35 +1,35 @@
-# 🏪 DELODUR POS System
+# DELODUR POS System
 
 A modern Point of Sale (POS) system built with React, Node.js, and MySQL. This system provides a sleek, touch-friendly interface for retail operations with real-time inventory management.
 
-## ✨ Features
+## Features
 
-### 🎯 **Modern POS Interface**
+### **Modern POS Interface**
 - **Dark Theme**: Luxurious automotive-inspired design with deep blacks and blue accents
 - **Touch-Friendly**: Large buttons and controls optimized for retail use
 - **Real-time Clock**: 12-hour format with live updates
 - **Responsive Design**: Works on desktop, tablet, and mobile devices
 
-### 📊 **Dashboard**
+### **Dashboard**
 - **Live Statistics**: Total products, stock items, sales, and inventory value
 - **Quick Actions**: Start sales, add products, view reports
 - **Recent Activity**: System status and activity feed
 - **Real-time Data**: Connected to your existing inventory database
 
-### 🛒 **Sales Module**
+### **Sales Module**
 - **Product Search**: Search by name or product code
 - **Shopping Cart**: Add/remove items with quantity controls
 - **Tax Calculation**: Automatic 12% tax computation
 - **Philippine Peso**: Native ₱ currency support
 - **Transaction Management**: Clear cart and complete sales
 
-### 📦 **Inventory Management**
+### **Inventory Management**
 - **Stock Tracking**: Real-time stock levels
 - **Product Management**: Add, edit, and manage products
 - **Supplier Management**: Track suppliers and relationships
 - **Reports**: Generate sales and inventory reports
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 ### **Frontend**
 - **React 18**: Modern UI framework
@@ -43,7 +43,7 @@ A modern Point of Sale (POS) system built with React, Node.js, and MySQL. This s
 - **MySQL**: Database management
 - **JWT**: Authentication and security
 
-## 🚀 Installation
+## Installation
 
 ### **Prerequisites**
 - Node.js (v16 or higher)
@@ -103,7 +103,7 @@ A modern Point of Sale (POS) system built with React, Node.js, and MySQL. This s
    npm start
    ```
 
-## 📱 Usage
+## Usage
 
 ### **Login**
 - Default credentials: `admin` / `password`
@@ -125,7 +125,7 @@ A modern Point of Sale (POS) system built with React, Node.js, and MySQL. This s
 5. Review totals and tax calculation
 6. Complete the sale
 
-## 🎨 Design Features
+## Design Features
 
 ### **Color Scheme**
 - **Primary**: Deep blacks (#0a0a0a, #1a1a1a)
@@ -145,7 +145,7 @@ A modern Point of Sale (POS) system built with React, Node.js, and MySQL. This s
 - Excellent readability
 - Touch-optimized sizing
 
-## 🔧 Configuration
+## Configuration
 
 ### **Customization**
 - Modify colors in `client/src/App.css`
@@ -157,11 +157,11 @@ A modern Point of Sale (POS) system built with React, Node.js, and MySQL. This s
 - Import legacy data using provided migration scripts
 - Maintain data integrity with foreign key relationships
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
@@ -169,14 +169,14 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
-## 📞 Support
+## Support
 
 For support and questions:
 - Create an issue on GitHub
 - Contact: [your-email@example.com]
 - Documentation: [link-to-docs]
 
-## 🎉 Acknowledgments
+## Acknowledgments
 
 - **React Bootstrap Icons** for beautiful icons
 - **Express.js** for robust backend framework
@@ -185,4 +185,4 @@ For support and questions:
 
 ---
 
-**Built with ❤️ for DELODUR CORPORATION** 
+**Built for DELODUR CORPORATION** 

@@ -1,6 +1,6 @@
-# 🏪 DELODUR POS System - Complete Documentation
+# DELODUR POS System - Complete Documentation
 
-## 📋 Table of Contents
+## Table of Contents
 1. [System Overview](#system-overview)
 2. [Architecture](#architecture)
 3. [Features](#features)
@@ -16,7 +16,7 @@
 
 ---
 
-## 🎯 System Overview
+## System Overview
 
 ### What is DELODUR POS System?
 The DELODUR POS System is a comprehensive **Point of Sale (POS) and Inventory Management System** specifically designed for automotive parts retail operations. It provides a modern, touch-friendly interface for managing sales, inventory, suppliers, and business analytics.
@@ -38,7 +38,7 @@ The DELODUR POS System is a comprehensive **Point of Sale (POS) and Inventory Ma
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ### System Architecture Overview
 ```
@@ -76,9 +76,9 @@ The DELODUR POS System is a comprehensive **Point of Sale (POS) and Inventory Ma
 
 ---
 
-## ✨ Features
+## Features
 
-### 🛒 Point of Sale (POS)
+### Point of Sale (POS)
 - **Product Search** by name, barcode, or product code
 - **Shopping Cart** with quantity controls
 - **Tax Calculation** (12% Philippine tax)
@@ -86,7 +86,7 @@ The DELODUR POS System is a comprehensive **Point of Sale (POS) and Inventory Ma
 - **Payment Processing** with multiple currency support
 - **Transaction History** tracking
 
-### 📦 Inventory Management
+### Inventory Management
 - **Real-time Stock Levels** monitoring
 - **Barcode/QR Code** scanning support
 - **Stock Movements** tracking (incoming/outgoing)
@@ -94,26 +94,26 @@ The DELODUR POS System is a comprehensive **Point of Sale (POS) and Inventory Ma
 - **Multi-location** warehouse support
 - **Product Variations** (color, size, etc.)
 
-### 👥 User Management
+### User Management
 - **Role-based Access** (Admin, User)
 - **JWT Authentication** with secure sessions
 - **User Activity** logging
 - **Password Security** with bcrypt hashing
 
-### 📊 Reporting & Analytics
+### Reporting & Analytics
 - **Sales Reports** with date filtering
 - **Inventory Reports** with stock levels
 - **Supplier Reports** with purchase history
 - **Dashboard** with key metrics
 - **Chart Visualizations** for trends
 
-### 🤖 AI Chatbot
+### AI Chatbot
 - **OpenAI Integration** for intelligent responses
 - **Customer Support** automation
 - **Product Information** assistance
 - **Order Status** inquiries
 
-### 🏢 Supplier Management
+### Supplier Management
 - **Supplier Database** with contact information
 - **Purchase Order** tracking
 - **Supplier Performance** analytics
@@ -121,7 +121,7 @@ The DELODUR POS System is a comprehensive **Point of Sale (POS) and Inventory Ma
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 ### Frontend Technologies
 | Technology | Version | Purpose |
@@ -159,7 +159,7 @@ The DELODUR POS System is a comprehensive **Point of Sale (POS) and Inventory Ma
 
 ---
 
-## 🚀 Installation & Setup
+## Installation & Setup
 
 ### Prerequisites
 - **Node.js** (v16 or higher)
@@ -226,7 +226,7 @@ npm start
 
 ---
 
-## 🗄️ Database Schema
+## Database Schema
 
 ### Core Tables
 
@@ -495,7 +495,7 @@ The dashboard provides:
 
 ---
 
-## 🔧 Administration Guide
+## Administration Guide
 
 ### User Management
 
@@ -616,7 +616,7 @@ JWT_SECRET=very_secure_jwt_secret
 
 ---
 
-## 🔒 Security
+## Security
 
 ### Authentication Security
 - **JWT Tokens**: Secure session management
@@ -644,7 +644,7 @@ JWT_SECRET=very_secure_jwt_secret
 
 ---
 
-## 📊 System Statistics
+## System Statistics
 
 ### Code Metrics
 - **Total Lines**: 34,630 lines
@@ -671,7 +671,7 @@ JWT_SECRET=very_secure_jwt_secret
 
 ---
 
-## 🎯 Future Enhancements
+## Future Enhancements
 
 ### Planned Features
 1. **Mobile App**: React Native mobile application

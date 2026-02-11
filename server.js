@@ -5930,6 +5930,19 @@ app.put('/api/stock/barcode-scan-update', authenticateToken, async (req, res) =>
 const multer = require('multer');
 const upload = multer({ dest: 'temp/' });
 
+// PDF upload for PDF-to-Excel (max 15MB, PDF only)
+const pdfUpload = multer({
+  dest: 'temp/',
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf' || (file.originalname && file.originalname.toLowerCase().endsWith('.pdf'))) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed'), false);
+    }
+  }
+});
+
 // Stock CSV Import API
 app.post('/api/stock/upload-csv', authenticateToken, upload.single('csvFile'), async (req, res) => {
   try {
@@ -6382,6 +6395,105 @@ app.post('/api/master/import-csv', authenticateToken, upload.single('csvFile'), 
     res.status(500).json({ 
       error: 'CSV import failed', 
       message: error.message 
+    });
+  }
+});
+
+// PDF to Excel - AI extracts data from invoice/supplier PDF and returns Excel
+app.post('/api/pdf-to-excel', authenticateToken, pdfUpload.single('pdf'), async (req, res) => {
+  let pdfPath = null;
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No PDF file uploaded' });
+    }
+    pdfPath = req.file.path;
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ success: false, message: 'PDF-to-Excel is not configured (missing OPENAI_API_KEY)' });
+    }
+
+    const pdfParse = require('pdf-parse');
+    const XLSX = require('xlsx');
+    const fs = require('fs');
+
+    const dataBuffer = await fs.promises.readFile(pdfPath);
+    const pdfData = await pdfParse(dataBuffer);
+    const rawText = pdfData.text || '';
+    if (!rawText || rawText.trim().length < 50) {
+      return res.status(400).json({ success: false, message: 'PDF has no extractable text or is too short' });
+    }
+
+    // Truncate if very long to stay within token limits (keep first ~20k chars)
+    const text = rawText.length > 20000 ? rawText.slice(0, 20000) + '\n...[truncated]' : rawText;
+
+    const configuration = new Configuration({ apiKey });
+    const openai = new OpenAIApi(configuration);
+    const systemPrompt = `You extract tabular data from invoice/order PDFs. Output ONLY a valid JSON array of objects, one per line item. No markdown, no explanation.
+Rules: Ignore header/footer, "Amount brought forward", page numbers. Treat "Order No." and "Your Purchase No." as grouping: attach OrderNo and PurchaseNo to each line item that follows. Each item: RefNo, Description, CompNo, Quantity, PriceUnit, PriceEUR, NetEUR, OrderNo, PurchaseNo. Use empty string if missing. Numbers in JSON with dot. Example: [{"RefNo":"49424","Description":"Engine Mounting","CompNo":"204 240 37 17","Quantity":"2","PriceUnit":"PCE","PriceEUR":"75.04","NetEUR":"150.08","OrderNo":"1062242833","PurchaseNo":"Febi BMW Firm Order 2023"}]`;
+
+    let reply = '';
+    try {
+      const completion = await openai.createChatCompletion({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Extract line items from this document:\n\n${text}` }
+        ],
+        temperature: 0.2
+      });
+      reply = completion.data?.choices?.[0]?.message?.content?.trim() || '';
+    } catch (openaiErr) {
+      if (openaiErr.message && openaiErr.message.includes('createChatCompletion')) {
+        const OpenAI = require('openai').default || require('openai');
+        const client = new OpenAI({ apiKey });
+        const completion = await client.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Extract line items from this document:\n\n${text}` }
+          ],
+          temperature: 0.2
+        });
+        reply = completion.choices?.[0]?.message?.content?.trim() || '';
+      } else throw openaiErr;
+    }
+    if (!reply) {
+      return res.status(502).json({ success: false, message: 'AI did not return extractable data' });
+    }
+
+    let items = [];
+    try {
+      const cleaned = reply.replace(/```json?\s*|\s*```/g, '').trim();
+      items = JSON.parse(cleaned);
+      if (!Array.isArray(items)) items = [items];
+    } catch (e) {
+      return res.status(502).json({ success: false, message: 'Could not parse AI response as JSON. Try a simpler PDF.' });
+    }
+
+    const headers = ['RefNo', 'Description', 'CompNo', 'Quantity', 'PriceUnit', 'PriceEUR', 'NetEUR', 'OrderNo', 'PurchaseNo'];
+    const rows = items.map(obj => headers.map(h => obj[h] != null ? String(obj[h]) : ''));
+    const wsData = [headers, ...rows];
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    XLSX.utils.book_append_sheet(wb, ws, 'Line Items');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    await fs.promises.unlink(pdfPath).catch(() => {});
+    pdfPath = null;
+
+    const filename = `extracted-line-items-${Date.now()}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buf);
+  } catch (err) {
+    if (pdfPath) {
+      try { await require('fs').promises.unlink(pdfPath); } catch (_) {}
+    }
+    console.error('PDF-to-Excel error:', err.message);
+    const status = err.response?.status === 429 ? 429 : (err.response?.status || 500);
+    res.status(status).json({
+      success: false,
+      message: err.message || 'Failed to process PDF'
     });
   }
 });
@@ -6861,19 +6973,40 @@ app.post('/api/incoming/import-dbf', authenticateToken, async (req, res) => {
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
-      
+      const [lineOrderCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'line_order'`);
+      if (lineOrderCol.length === 0) {
+        await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN line_order INT DEFAULT NULL`);
+        await connection.execute(`UPDATE inc_tbl SET line_order = id WHERE line_order IS NULL`);
+      }
+      const [maxRows] = await connection.execute(
+        `SELECT COALESCE(MAX(line_order), -1) AS maxOrder FROM inc_tbl WHERE tab_number = ?`,
+        [tabNumber || 1]
+      );
+      let lineOrderBase = ((maxRows && maxRows[0] && maxRows[0].maxOrder != null) ? maxRows[0].maxOrder : -1) + 1;
       let successCount = 0;
       let errorCount = 0;
       const errors = [];
       
       for (const record of records) {
         try {
+          // Get DINFLAG - DBF may use different field name (DINFLAG, DINFLG, dinflag) or DOCREF for "D"
+          const getDinFlag = (rec) => {
+            const keys = Object.keys(rec || {});
+            const dinKey = keys.find(k => ['DINFLAG', 'DINFLG'].includes(k.toUpperCase()));
+            const val = dinKey ? rec[dinKey] : null;
+            if (val != null && String(val).trim() !== '') return String(val).trim();
+            const docrefKey = keys.find(k => k.toUpperCase() === 'DOCREF');
+            const docrefVal = docrefKey ? rec[docrefKey] : null;
+            if (docrefVal != null && String(docrefVal).trim() === 'D') return 'D';
+            return '';
+          };
+          
           // Map DBF fields to inc_tbl fields
           const incData = {
             supplier: record.SUPPLIER || '',
             date: record.DATE ? record.DATE.replace(/-/g, '') : new Date().toISOString().split('T')[0].replace(/-/g, ''),
             reference: record.REF || '',
-            din_flag: record.DINFLAG || '',
+            din_flag: getDinFlag(record),
             benz_number: record.BENZ || '',
             benz_number2: record.BENZ2 || '',
             benz_number3: record.BENZ3 || '',
@@ -6894,20 +7027,20 @@ app.post('/api/incoming/import-dbf', authenticateToken, async (req, res) => {
             tab_number: tabNumber || 1 // Use provided tab number or default to Tab 1
           };
           
-          // Insert into inc_tbl
+          // Insert into inc_tbl (line_order preserves file order for Arrange)
           await connection.execute(`
             INSERT INTO inc_tbl (
               SUPPLIER, DATE, REF, DINFLAG, BENZ, BENZ2, BENZ3, BRAND, ALTNO, ALTNO2,
               \`DESC\`, APPL, COLORCODE, REMARKS, COST, SELL, QTY, CURRENCY, FCAMOUNT, 
-              CONVERSION, LOCATION, tab_number
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              CONVERSION, LOCATION, tab_number, line_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `, [
             incData.supplier, incData.date, incData.reference, incData.din_flag,
             incData.benz_number, incData.benz_number2, incData.benz_number3, incData.brand,
             incData.altno, incData.altno2, incData.description, incData.application,
             incData.color_code, incData.remarks, incData.cost, incData.selling_price,
             incData.quantity, incData.currency, incData.fc_cost, incData.conversion,
-            incData.location, incData.tab_number
+            incData.location, incData.tab_number, lineOrderBase + successCount
           ]);
           
           successCount++;
@@ -9298,7 +9431,7 @@ app.post('/api/inc_tbl/add', authenticateToken, async (req, res) => {
     const {
       supplier, date, reference, din_flag, benz_number, benz_number2, benz_number3,
       brand, altno, altno2, description, application, color_code, remarks,
-      cost, selling_price, currency, fc_cost, conversion, quantity, location
+      cost, selling_price, currency, fc_cost, conversion, quantity, location, factor
     } = req.body;
     
     // Validate required fields
@@ -9324,13 +9457,36 @@ app.post('/api/inc_tbl/add', authenticateToken, async (req, res) => {
         });
       }
       
+      // Ensure factor column exists
+      try {
+        const [factorCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'factor'`);
+        if (factorCol.length === 0) {
+          await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN factor DECIMAL(10,4) DEFAULT NULL`);
+        }
+      } catch (migrationErr) { /* ignore */ }
+      // Ensure line_order column exists
+      try {
+        const [lineOrderCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'line_order'`);
+        if (lineOrderCol.length === 0) {
+          await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN line_order INT DEFAULT NULL`);
+          await connection.execute(`UPDATE inc_tbl SET line_order = id WHERE line_order IS NULL`);
+        }
+      } catch (migrationErr) { /* ignore */ }
+      
+      const tabNum = parseInt(req.body.tab_number) || 1;
+      const [[maxOrder]] = await connection.execute(
+        `SELECT COALESCE(MAX(line_order), 0) + 1 AS next_order FROM inc_tbl WHERE tab_number = ?`,
+        [tabNum]
+      );
+      const nextLineOrder = maxOrder?.next_order ?? 1;
+      
       // Insert new record into inc_tbl
       const [result] = await connection.execute(`
         INSERT INTO inc_tbl (
           SUPPLIER, DATE, REF, DINFLAG, BENZ, BENZ2, BENZ3, BRAND, ALTNO, ALTNO2,
           \`DESC\`, APPL, COLORCODE, REMARKS, COST, SELL, QTY, CURRENCY, FCAMOUNT, 
-          CONVERSION, LOCATION, tab_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          CONVERSION, LOCATION, tab_number, factor, line_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         supplier || '',
         date ? date.replace(/-/g, '') : '',
@@ -9353,7 +9509,9 @@ app.post('/api/inc_tbl/add', authenticateToken, async (req, res) => {
         parseFloat(fc_cost) || 0,
         parseFloat(conversion) || 1,
         location || '',
-        parseInt(req.body.tab_number) || 1
+        tabNum,
+        factor != null && factor !== '' ? parseFloat(factor) : null,
+        nextLineOrder
       ]);
       
       console.log(`✅ Added incoming stock to inc_tbl with ID: ${result.insertId}`);
@@ -9408,19 +9566,41 @@ app.get('/api/inc_tbl/by-tab/:tabNumber', authenticateToken, async (req, res) =>
         });
       }
       
-      // Fetch items for the specific tab
+      // Ensure factor column exists (migration for existing installations)
+      try {
+        const [factorCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'factor'`);
+        if (factorCol.length === 0) {
+          await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN factor DECIMAL(10,4) DEFAULT NULL`);
+          console.log('✅ Added factor column to inc_tbl');
+        }
+      } catch (migrationErr) {
+        console.warn('⚠️ Factor column migration skipped:', migrationErr.message);
+      }
+      // Ensure line_order column exists (for Arrange lineup)
+      try {
+        const [lineOrderCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'line_order'`);
+        if (lineOrderCol.length === 0) {
+          await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN line_order INT DEFAULT NULL`);
+          await connection.execute(`UPDATE inc_tbl SET line_order = id WHERE line_order IS NULL`);
+          console.log('✅ Added line_order column to inc_tbl');
+        }
+      } catch (migrationErr) {
+        console.warn('⚠️ line_order column migration skipped:', migrationErr.message);
+      }
+      
+      // Fetch items for the specific tab (order by line_order for Arrange feature)
       const [rows] = await connection.execute(`
         SELECT 
-          id, SUPPLIER as supplier, DATE as date, REF as reference, DINFLAG as din_flag,
+          id, line_order, SUPPLIER as supplier, DATE as date, REF as reference, DINFLAG as din_flag,
           BENZ as benz_number, BENZ2 as benz_number2, BENZ3 as benz_number3,
           BRAND as brand, ALTNO as altno, ALTNO2 as altno2,
           \`DESC\` as description, APPL as application, COLORCODE as color_code,
           REMARKS as remarks, COST as cost, SELL as selling_price, QTY as quantity,
           CURRENCY as currency, FCAMOUNT as fc_cost, CONVERSION as conversion,
-          LOCATION as location, tab_number, created_at
+          LOCATION as location, tab_number, created_at, factor
         FROM inc_tbl 
         WHERE tab_number = ?
-        ORDER BY created_at DESC
+        ORDER BY COALESCE(line_order, 999999) ASC, id ASC
       `, [tabNum]);
       
       console.log(`✅ Found ${rows.length} items for tab ${tabNum}`);
@@ -9707,7 +9887,7 @@ app.put('/api/inc_tbl/update/:id', authenticateToken, async (req, res) => {
     const {
       supplier, date, reference, din_flag, benz_number, benz_number2, benz_number3,
       brand, altno, altno2, description, application, color_code, remarks,
-      cost, selling_price, currency, fc_cost, conversion, quantity, location, tab_number
+      cost, selling_price, currency, fc_cost, conversion, quantity, location, tab_number, factor
     } = req.body;
     
     // Validate required fields
@@ -9746,13 +9926,21 @@ app.put('/api/inc_tbl/update/:id', authenticateToken, async (req, res) => {
         });
       }
       
+      // Ensure factor column exists
+      try {
+        const [factorCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'factor'`);
+        if (factorCol.length === 0) {
+          await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN factor DECIMAL(10,4) DEFAULT NULL`);
+        }
+      } catch (migrationErr) { /* ignore */ }
+      
       // Update record in inc_tbl
       const [result] = await connection.execute(`
         UPDATE inc_tbl SET
           SUPPLIER = ?, DATE = ?, REF = ?, DINFLAG = ?, BENZ = ?, BENZ2 = ?, BENZ3 = ?,
           BRAND = ?, ALTNO = ?, ALTNO2 = ?, \`DESC\` = ?, APPL = ?, COLORCODE = ?, 
           REMARKS = ?, COST = ?, SELL = ?, QTY = ?, CURRENCY = ?, FCAMOUNT = ?, 
-          CONVERSION = ?, LOCATION = ?, tab_number = ?
+          CONVERSION = ?, LOCATION = ?, tab_number = ?, factor = ?
         WHERE id = ?
       `, [
         supplier || '',
@@ -9777,6 +9965,7 @@ app.put('/api/inc_tbl/update/:id', authenticateToken, async (req, res) => {
         parseFloat(conversion) || 1,
         location || '',
         parseInt(tab_number) || 1,
+        factor != null && factor !== '' ? parseFloat(factor) : null,
         id
       ]);
       
@@ -9797,6 +9986,263 @@ app.put('/api/inc_tbl/update/:id', authenticateToken, async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: 'Failed to update incoming stock item', 
+      message: error.message 
+    });
+  }
+});
+
+// Update cost only for an inc_tbl item (used by Factor × FC Cost action - no full validation)
+app.put('/api/inc_tbl/update-cost/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { cost } = req.body;
+    
+    if (!id) {
+      return res.status(400).json({ success: false, message: 'Item ID is required' });
+    }
+    
+    const costVal = parseFloat(cost);
+    if (isNaN(costVal) || costVal < 0) {
+      return res.status(400).json({ success: false, message: 'Cost must be a valid non-negative number' });
+    }
+    
+    const connection = await pool.getConnection();
+    try {
+      const [result] = await connection.execute(
+        `UPDATE inc_tbl SET COST = ? WHERE id = ?`,
+        [costVal, id]
+      );
+      
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ success: false, message: 'Item not found' });
+      }
+      
+      res.json({ success: true, message: 'Cost updated', id });
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('❌ Error updating cost:', error);
+    res.status(500).json({ success: false, error: 'Failed to update cost', message: error.message });
+  }
+});
+
+// Reorder incoming items for a tab (Arrange lineup)
+app.put('/api/inc_tbl/reorder/:tabNumber', authenticateToken, async (req, res) => {
+  try {
+    const { tabNumber } = req.params;
+    const { orderedIds } = req.body;
+    const tabNum = parseInt(tabNumber);
+    
+    if (isNaN(tabNum) || tabNum < 1 || tabNum > 10) {
+      return res.status(400).json({ message: 'Invalid tab number. Must be between 1 and 10.' });
+    }
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ message: 'orderedIds must be a non-empty array of item ids.' });
+    }
+    
+    const connection = await pool.getConnection();
+    try {
+      const [lineOrderCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'line_order'`);
+      if (lineOrderCol.length === 0) {
+        await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN line_order INT DEFAULT NULL`);
+        await connection.execute(`UPDATE inc_tbl SET line_order = id WHERE line_order IS NULL`);
+      }
+      for (let i = 0; i < orderedIds.length; i++) {
+        await connection.execute(
+          `UPDATE inc_tbl SET line_order = ? WHERE id = ? AND tab_number = ?`,
+          [i, orderedIds[i], tabNum]
+        );
+      }
+    } finally {
+      connection.release();
+    }
+    
+    res.json({ success: true, message: 'Order saved.' });
+  } catch (error) {
+    console.error('❌ Error reordering inc_tbl:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to save order.' });
+  }
+});
+
+// Export incoming (current tab) to INCOMING.DBF file
+app.get('/api/inc_tbl/export-dbf', authenticateToken, async (req, res) => {
+  try {
+    const { tabNumber } = req.query;
+    const tabNum = parseInt(tabNumber);
+    
+    if (isNaN(tabNum) || tabNum < 1 || tabNum > 10) {
+      return res.status(400).json({ message: 'Invalid tab number. Must be between 1 and 10.' });
+    }
+    
+    console.log(`📦 Exporting incoming to INCOMING.DBF for tab ${tabNum}`);
+    
+    const connection = await pool.getConnection();
+    let rows;
+    try {
+      const [lineOrderCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'line_order'`);
+      if (lineOrderCol.length === 0) {
+        await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN line_order INT DEFAULT NULL`);
+        await connection.execute(`UPDATE inc_tbl SET line_order = id WHERE line_order IS NULL`);
+      }
+      [rows] = await connection.execute(`
+        SELECT SUPPLIER, DATE, REF, DINFLAG, BENZ, BENZ2, BENZ3, BRAND, ALTNO, ALTNO2,
+          COLORCODE, REMARKS, COST, SELL, QTY, CURRENCY, FCAMOUNT, CONVERSION
+        FROM inc_tbl
+        WHERE tab_number = ?
+        ORDER BY COALESCE(line_order, 999999) ASC, id ASC
+      `, [tabNum]);
+    } finally {
+      connection.release();
+    }
+    
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: 'No incoming data found for this tab.' });
+    }
+    
+    console.log(`📊 Found ${rows.length} records to export`);
+    
+    // INCOMING.DBF structure - FoxBase+/dBASE III PLUS (20 fields, exact schema)
+    const fieldDefs = [
+      { name: 'SUPPLIER', type: 'C', size: 5 },
+      { name: 'DATE', type: 'D', size: 8 },
+      { name: 'REF', type: 'C', size: 10 },
+      { name: 'DOCREF', type: 'C', size: 10 },
+      { name: 'DINFLAG', type: 'C', size: 1 },
+      { name: 'BENZ', type: 'C', size: 16 },
+      { name: 'BENZ2', type: 'C', size: 16 },
+      { name: 'BENZ3', type: 'C', size: 16 },
+      { name: 'BRAND', type: 'C', size: 12 },
+      { name: 'ALTNO', type: 'C', size: 20 },
+      { name: 'ALTNO2', type: 'C', size: 20 },
+      { name: 'COLORCODE', type: 'C', size: 4 },
+      { name: 'REMARKS', type: 'C', size: 1 },
+      { name: 'COST', type: 'N', size: 9, decimalPlaces: 2 },
+      { name: 'SELL', type: 'N', size: 9, decimalPlaces: 2 },
+      { name: 'QTY', type: 'N', size: 5, decimalPlaces: 0 },
+      { name: 'CURRENCY', type: 'C', size: 3 },
+      { name: 'FCAMOUNT', type: 'N', size: 9, decimalPlaces: 2 },
+      { name: 'CONVERSION', type: 'N', size: 9, decimalPlaces: 2 },
+      { name: 'LOCATION', type: 'C', size: 10 }
+    ];
+    
+    const dbfRecords = rows.map(row => {
+      let dateValue = null;
+      const dateStr = row.DATE ? String(row.DATE).replace(/-/g, '') : '';
+      if (dateStr && dateStr.length >= 8) {
+        const year = parseInt(dateStr.substring(0, 4), 10);
+        const month = parseInt(dateStr.substring(4, 6), 10) - 1;
+        const day = parseInt(dateStr.substring(6, 8), 10);
+        const dateObj = new Date(year, month, day, 12, 0, 0, 0);
+        if (!isNaN(dateObj.getTime())) dateValue = dateObj;
+      }
+      
+      return {
+        SUPPLIER: String(row.SUPPLIER || '').padEnd(5, ' ').substring(0, 5),
+        DATE: dateValue,
+        REF: String(row.REF || '').padEnd(10, ' ').substring(0, 10),
+        DOCREF: ''.padEnd(10, ' '),
+        DINFLAG: String(row.DINFLAG || '').padEnd(1, ' ').substring(0, 1),
+        BENZ: String(row.BENZ || '').padEnd(16, ' ').substring(0, 16),
+        BENZ2: String(row.BENZ2 || '').padEnd(16, ' ').substring(0, 16),
+        BENZ3: String(row.BENZ3 || '').padEnd(16, ' ').substring(0, 16),
+        BRAND: String(row.BRAND || '').padEnd(12, ' ').substring(0, 12),
+        ALTNO: String(row.ALTNO || '').padEnd(20, ' ').substring(0, 20),
+        ALTNO2: String(row.ALTNO2 || '').padEnd(20, ' ').substring(0, 20),
+        COLORCODE: String(row.COLORCODE || '').padEnd(4, ' ').substring(0, 4),
+        REMARKS: String(row.REMARKS || '').padEnd(1, ' ').substring(0, 1),
+        COST: parseFloat(row.COST) || 0,
+        SELL: parseFloat(row.SELL) || 0,
+        QTY: parseInt(row.QTY) || 0,
+        CURRENCY: String(row.CURRENCY || '').padEnd(3, ' ').substring(0, 3),
+        FCAMOUNT: parseFloat(row.FCAMOUNT) || 0,
+        CONVERSION: parseFloat(row.CONVERSION) || 1,
+        LOCATION: ''.padEnd(10, ' ')
+      };
+    });
+    
+    const outputDir = 'C:\\Rae\\Files';
+    const outputFilePath = path.join(outputDir, 'INCOMING.DBF');
+    const fs = require('fs');
+    
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+      console.log(`📁 Created directory: ${outputDir}`);
+    }
+    
+    if (fs.existsSync(outputFilePath)) {
+      try {
+        fs.unlinkSync(outputFilePath);
+      } catch (deleteError) {
+        console.warn(`⚠️ Could not remove existing file: ${deleteError.message}`);
+      }
+    }
+    
+    const dbf = await DBFFile.create(outputFilePath, fieldDefs);
+    await dbf.appendRecords(dbfRecords);
+    
+    console.log(`✅ INCOMING.DBF created: ${outputFilePath}`);
+    
+    const finalFileBuffer = fs.readFileSync(outputFilePath);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="INCOMING.DBF"');
+    res.setHeader('Content-Length', finalFileBuffer.length);
+    res.send(finalFileBuffer);
+    
+  } catch (error) {
+    console.error('❌ Incoming DBF export error:', error);
+    if (error.code === 'EBUSY' || error.code === 'EPERM' || error.message.includes('locked') || error.message.includes('being used')) {
+      return res.status(409).json({ 
+        message: 'File is locked', 
+        error: 'INCOMING.DBF is currently open. Please close it and try again.',
+        details: error.message
+      });
+    }
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Bulk update factor for all items in a tab
+app.put('/api/inc_tbl/bulk-update-factor/:tabNumber', authenticateToken, async (req, res) => {
+  try {
+    const { tabNumber } = req.params;
+    const { factor } = req.body;
+    const tabNum = parseInt(tabNumber);
+    
+    if (isNaN(tabNum) || tabNum < 1 || tabNum > 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid tab number. Must be between 1 and 10.'
+      });
+    }
+    
+    const factorVal = factor != null && factor !== '' ? parseFloat(factor) : null;
+    
+    const connection = await pool.getConnection();
+    try {
+      const [factorCol] = await connection.execute(`SHOW COLUMNS FROM inc_tbl LIKE 'factor'`);
+      if (factorCol.length === 0) {
+        await connection.execute(`ALTER TABLE inc_tbl ADD COLUMN factor DECIMAL(10,4) DEFAULT NULL`);
+      }
+      
+      const [result] = await connection.execute(
+        `UPDATE inc_tbl SET factor = ? WHERE tab_number = ?`,
+        [factorVal, tabNum]
+      );
+      
+      res.json({
+        success: true,
+        message: `Factor updated for all items in tab ${tabNum}`,
+        updatedCount: result.affectedRows
+      });
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('❌ Error bulk updating factor:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to bulk update factor', 
       message: error.message 
     });
   }
@@ -12620,6 +13066,8 @@ app.post('/api/sales/refunds/:id/confirm', authenticateToken, async (req, res) =
           const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
           
           // Insert a new negative record as a duplicate on TODAY's date (for refund display)
+          // RECEIPT/INVOICE = CM number so Sales History shows Credit Memo # on the refund row
+          const cmNumber = refund.cm_number || original.RECEIPT;
           await conn.query(
             `INSERT INTO history (
               CUSTOMER, DATE, RECEIPT, INVOICE, IDCODE,
@@ -12630,8 +13078,8 @@ app.post('/api/sales/refunds/:id/confirm', authenticateToken, async (req, res) =
             [
               original.CUSTOMER,
               today, // Use today's date instead of original date
-              original.RECEIPT, // Same receipt number as original
-              original.INVOICE || original.RECEIPT, // Same invoice number as original
+              cmNumber, // CM number for refund row
+              cmNumber,
               original.IDCODE,
               -Math.abs(original.SELL || 0), // Negative unit price
               -Math.abs(item.quantity), // Negative quantity (use refund quantity)
